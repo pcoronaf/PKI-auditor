@@ -15,7 +15,8 @@ Y distingue rigurosamente entre **“no observé transmisión de la clave”** y
 **“la clave no puede transmitirse”**. Los reportes son conservadores,
 reproducibles y basados en evidencia.
 
-> **Estado: en construcción.** Ver [Estado de implementación](#estado-de-implementación).
+> **Estado: alfa funcional.** Los cuatro niveles se ejecutan de extremo a extremo
+> sobre las aplicaciones de laboratorio. Ver [Estado de implementación](#estado-de-implementación).
 
 Licencia: Apache-2.0.
 
@@ -127,41 +128,76 @@ Otras desviaciones deliberadas respecto de la especificación:
 
 | Componente | Estado |
 |---|---|
-| Modelo de eventos y etiquetas de procedencia | implementado |
-| Estados de conclusión | implementado |
-| Vault de secretos, canarios y redacción | implementado |
-| Configuración por niveles | implementado |
-| Expediente SQLite + cadena de hashes | implementado |
-| Agente de instrumentación (sources, WebCrypto, sinks, storage, workers) | implementado |
-| Observación de red por CDP y clasificación de terceros | implementado |
-| Controlador de navegador (perfil efímero, aislamiento de red, inventario de scripts) | implementado |
-| Credenciales sintéticas | implementado |
-| Analizador estático (AST, taint interprocedural, source maps) | implementado, **sin verificar** |
-| Motor de reglas y catálogo `FS-*` (12 reglas) | implementado, **sin verificar** |
-| Motor de correlación | **pendiente** |
-| Motor de reportes (HTML + JSON) | **pendiente** |
+| Modelo de eventos y etiquetas de procedencia | implementado, con pruebas |
+| Estados de conclusión | implementado, con pruebas |
+| Vault de secretos, canarios y redacción | implementado, con pruebas |
+| Configuración por niveles | implementado, con pruebas |
+| Expediente SQLite + cadena de hashes | implementado, con pruebas |
+| Agente de instrumentación (sources, WebCrypto, sinks, storage, workers) | implementado, con pruebas e2e |
+| Observación de red por CDP y clasificación de terceros | implementado, con pruebas e2e |
+| Controlador de navegador (perfil efímero, aislamiento de red, inventario de scripts) | implementado, con pruebas e2e |
+| Credenciales sintéticas | implementado, con pruebas |
+| Analizador estático (AST, taint interprocedural, source maps) | implementado, con pruebas |
+| Motor de reglas y catálogo `FS-*` (12 reglas) | implementado, con pruebas |
+| Motor de correlación | implementado, con pruebas |
+| Motor de reportes (HTML + JSON) | implementado, con pruebas |
+| CLI (`firmascope audit ...`) | implementado, con pruebas |
+| Aplicaciones de laboratorio | implementadas, con pruebas e2e |
+| Pruebas TC-001..TC-006 | **verdes** |
 | Addon de mitmproxy | **pendiente** |
-| CLI (`firmascope audit ...`) | **pendiente** |
-| Aplicaciones de laboratorio (lógica) | **pendiente** |
-| Pruebas TC-001..TC-006 | **pendiente** |
 
-### Sobre “sin verificar”
+La suíte son 157 pruebas unitarias más 12 extremo a extremo que lanzan un
+Chromium real contra las cinco aplicaciones de laboratorio:
 
-Ningún módulo ha pasado todavía por una suíte de pruebas automatizada.
+```bash
+pytest -m "not e2e"    # rápido, sin navegador
+pytest -m e2e          # TC-001..TC-006 sobre el laboratorio
+```
 
-- Los módulos del núcleo (eventos, vault, expediente, credenciales, dominios) se
-  validaron con pruebas manuales durante el desarrollo: cadena de hashes,
-  detección de manipulación, redacción, coincidencia de canarios en base64 y
-  clasificación de dominios registrables.
-- El analizador estático y el motor de reglas se escribieron **sin poder
-  ejecutarlos**, por lo que deben tratarse como código sin verificar hasta que
-  exista la suíte de pruebas. El diseño se razonó contra el código real de las
-  aplicaciones de laboratorio, pero razonar no es ejecutar.
+### Comportamiento de referencia
 
-La suíte mínima que cerrará esa brecha son los casos TC-001..TC-006 de la
-especificación, sobre las cinco aplicaciones de laboratorio.
+Lo que la herramienta concluye hoy sobre cada aplicación de laboratorio:
 
----
+| Aplicación | Conclusión |
+|---|---|
+| `demo-safe` | sin hallazgos — firma local, sólo sale la firma |
+| `demo-key-exfiltration` | `FS-KEY-001` y `FS-PWD-001` OBSERVED |
+| `demo-encrypted-exfiltration` | `FS-NET-002` OBSERVED, `FS-KEY-002` POTENTIAL |
+| `demo-server-sign` | `FS-KEY-001` y `FS-PWD-001` OBSERVED |
+| `demo-static-only` | sólo `FS-CODE-001` POTENTIAL |
+
+Las dos filas que más dicen son la primera y la última. Que `demo-safe` no
+produzca ningún hallazgo es lo que hace utilizable al resto del catálogo: una
+herramienta que marca a las aplicaciones correctas no sirve para auditar
+ninguna. Y que `demo-static-only` produzca `POTENTIAL` sin producir
+`OBSERVED` es la separación entre los niveles 1 y 2: nada salió — eso es
+cierto — pero el código cargado puede hacerlo.
+
+`demo-encrypted-exfiltration` merece una nota. El seguimiento de procedencia
+no atraviesa un bucle que construye una cadena carácter a carácter, así que
+FirmaScope **no** afirma haber seguido el dato hasta la salida. Afirma lo que
+sí sostiene: que salió un cuerpo opaco después del acceso a la clave, y que
+el código contiene la ruta. Esa es la respuesta honesta, y es deliberado que
+no sea la más contundente.
+
+## Uso
+
+```bash
+pip install -e .
+
+firmascope credentials new -o creds     # credenciales sintéticas de laboratorio
+firmascope labs serve                   # http://127.0.0.1:8000
+firmascope audit http://127.0.0.1:8000/demo-key-exfiltration/ --level 3
+firmascope rules                        # catálogo de reglas
+firmascope verify audits/FS-XXXX-XXXX   # cadena de integridad del expediente
+```
+
+En modo `synthetic` (el de por defecto) FirmaScope genera un par .key/.cer de
+laboratorio, lo registra en el vault —de modo que cada representación
+buscable queda disponible como canario— y lo entrega al formulario del sitio.
+Si no reconoce el formulario lo dice y sugiere `--headed`, para que el
+operador conduzca la sesión a mano: rellenar el formulario equivocado sería
+peor que no rellenar ninguno.
 
 ## Documentación
 

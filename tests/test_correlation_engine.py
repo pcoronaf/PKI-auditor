@@ -283,3 +283,68 @@ def test_el_contexto_de_reglas_acepta_el_informe_de_correlacion(config):
     findings = {f.rule_id: f for f in RuleEngine().evaluate(context)}
     assert findings["FS-KEY-001"].status.value == "OBSERVED"
     assert context.correlation.exfiltration_chains()
+
+
+# ----------------------------------------------------------------------
+# Fusion de vistas de varios sensores
+# ----------------------------------------------------------------------
+
+def _view(sensor: str, offset: float, **kwargs):
+    event = egress(offset, url="https://evil.example/c", body_size=3329, **kwargs)
+    event.sensor = sensor
+    return event
+
+
+def test_una_peticion_vista_por_dos_sensores_es_una_sola_cadena():
+    """Contar tres veces la misma exfiltracion seria inflar el reporte."""
+    events = key_access() + [
+        _view("agent", 2.0, tags=[Tag.KEY_FILE], host="evil.example:443"),
+        _view("cdp", 2.05, host="evil.example"),
+    ]
+    report = correlate(events)
+
+    assert len(report.chains) == 1
+    chain = report.chains[0]
+    assert set(chain.corroboration) >= {"agent", "cdp"}
+    assert chain.confidence() is Confidence.HIGH
+
+
+def test_la_fusion_combina_etiquetas_y_canarios_de_cada_sensor():
+    """Cada sensor aporta lo que solo el puede ver."""
+    events = key_access() + [
+        _view("agent", 2.0, tags=[Tag.KEY_FILE]),
+        _view("proxy", 2.05, canary_matches=[
+            {"label": Tag.KEY_PASSWORD.value, "encoding": "utf8"}]),
+    ]
+    chain = correlate(events).chains[0]
+
+    assert Tag.KEY_FILE.value in chain.labels       # lo aporto la instrumentacion
+    assert Tag.KEY_PASSWORD.value in chain.labels   # lo aporto el proxy
+    assert "canary" in chain.corroboration
+
+
+def test_la_fusion_conserva_el_host_mas_especifico():
+    """CDP da "evil.example" donde el agente da "evil.example:8443"."""
+    events = key_access() + [
+        _view("agent", 2.0, tags=[Tag.KEY_FILE], host="evil.example:8443"),
+        _view("cdp", 2.05, host="evil.example"),
+    ]
+    assert correlate(events).chains[0].destination() == "evil.example:8443"
+
+
+def test_dos_salidas_del_mismo_sensor_no_se_funden():
+    """Dos peticiones identicas del mismo sensor son dos peticiones."""
+    events = key_access() + [
+        _view("agent", 2.0, tags=[Tag.KEY_FILE]),
+        _view("agent", 3.0, tags=[Tag.KEY_FILE]),
+    ]
+    assert len(correlate(events).chains) == 2
+
+
+def test_no_se_funden_salidas_de_distinto_tamano():
+    """Mismo destino, cuerpos distintos: son envios distintos."""
+    events = key_access() + [
+        _view("agent", 2.0, tags=[Tag.KEY_FILE]),
+        egress(2.1, tags=[Tag.KEY_FILE], url="https://evil.example/c", body_size=64),
+    ]
+    assert len(correlate(events).chains) == 2

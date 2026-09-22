@@ -287,7 +287,8 @@ class CorrelationEngine:
         ]
         report.first_key_access = _first_key_access(ordered)
 
-        for egress in (e for e in ordered if e.type in EGRESS_EVENTS):
+        egresses = _merge_sensor_views([e for e in ordered if e.type in EGRESS_EVENTS])
+        for egress in egresses:
             chain = self._chain_for(egress, sources, transforms, report.first_key_access, requests)
             if chain is None:
                 report.unattributed.append(egress)
@@ -370,6 +371,101 @@ class CorrelationEngine:
 # Auxiliares
 # ----------------------------------------------------------------------
 
+def _merge_sensor_views(egresses: Sequence[Event]) -> list[Event]:
+    """Funde las vistas que distintos sensores tienen de una misma salida.
+
+    En nivel 3 o 4 una sola peticion la ven la instrumentacion (que la
+    etiqueta), CDP (que la observa) y el proxy (que le busca canarios). Sin
+    fundirlas, el reporte contaria tres exfiltraciones donde hubo una, y ese
+    recuento inflado es justo lo que una herramienta de auditoria no puede
+    permitirse.
+
+    El criterio es conservador: solo se funden vistas de **sensores
+    distintos** sobre la misma URL y el mismo tamano de cuerpo. Dos salidas
+    vistas por el mismo sensor son dos salidas, aunque coincidan en todo.
+    """
+    groups: dict[tuple[str, int], list[Event]] = {}
+    order: list[tuple[str, int]] = []
+    for event in egresses:
+        key = (str(event.data.get("url") or ""),
+               int(event.data.get("body_size") or 0))
+        if key not in groups:
+            order.append(key)
+        groups.setdefault(key, []).append(event)
+
+    merged: list[Event] = []
+    for key in order:
+        bucket = groups[key]
+        if not key[0] or len(bucket) == 1:
+            merged.extend(bucket)
+            continue
+
+        # Dentro del grupo, una ranura por sensor: la segunda salida del mismo
+        # sensor abre una ranura nueva en lugar de fundirse.
+        slots: list[dict[str, Event]] = []
+        for event in bucket:
+            sensor = event.sensor or "?"
+            slot = next((s for s in slots if sensor not in s), None)
+            if slot is None:
+                slot = {}
+                slots.append(slot)
+            slot[sensor] = event
+
+        for slot in slots:
+            merged.append(_fuse(list(slot.values())))
+    return merged
+
+
+def _fuse(views: list[Event]) -> Event:
+    """Combina varias vistas de la misma salida en un unico evento.
+
+    Se conserva la vista mas informativa y se le anaden las etiquetas y los
+    canarios que aportaron las demas, mas la lista de sensores que la
+    sostienen.
+    """
+    if len(views) == 1:
+        return views[0]
+
+    primary = max(views, key=lambda e: (len(_labels_of(e)), len(e.data.get("canary_matches") or [])))
+    fused = Event(
+        type=primary.type,
+        session=primary.session,
+        timestamp=min((_usable(v.timestamp) or v.timestamp) for v in views),
+        context=primary.context,
+        origin=primary.origin,
+        source=primary.source or next((v.source for v in views if v.source), ""),
+        sensor=primary.sensor,
+        tags=list(primary.tags),
+        data=dict(primary.data),
+        id=primary.id,
+        seq=primary.seq,
+    )
+    for view in views:
+        for tag in view.tags:
+            if tag not in fused.tags:
+                fused.tags.append(tag)
+
+    matches = list(fused.data.get("canary_matches") or [])
+    seen = {(m.get("label"), m.get("encoding")) for m in matches if isinstance(m, dict)}
+    for view in views:
+        for match in view.data.get("canary_matches") or []:
+            if not isinstance(match, dict):
+                continue
+            key = (match.get("label"), match.get("encoding"))
+            if key not in seen:
+                seen.add(key)
+                matches.append(match)
+    if matches:
+        fused.data["canary_matches"] = matches
+
+    # El host mas especifico gana: CDP suele dar "127.0.0.1" donde el agente
+    # da "127.0.0.1:8000".
+    hosts = [str(v.data.get("host") or "") for v in views]
+    fused.data["host"] = max(hosts, key=len) if any(hosts) else fused.data.get("host", "")
+    fused.data["sensors"] = sorted({v.sensor for v in views if v.sensor})
+    return fused
+
+
 def _after(event: Event, reference: float | None) -> bool:
     """True si el evento es posterior a la referencia, cuando son comparables."""
     ts = _usable(event.timestamp)
@@ -448,8 +544,10 @@ def _verdict(labels: set[str]) -> str:
 def _corroboration(egress: Event, request: dict[str, Any] | None) -> list[str]:
     """Sensores independientes que sostienen esta salida."""
     sensors: list[str] = []
-    if egress.sensor:
-        sensors.append(egress.sensor)
+    # `sensors` lo deja _fuse cuando varias vistas se combinaron en una.
+    for sensor in egress.data.get("sensors") or ([egress.sensor] if egress.sensor else []):
+        if sensor and sensor not in sensors:
+            sensors.append(str(sensor))
     if request and request.get("sensor") and request["sensor"] not in sensors:
         sensors.append(str(request["sensor"]))
     if egress.data.get("canary_matches"):

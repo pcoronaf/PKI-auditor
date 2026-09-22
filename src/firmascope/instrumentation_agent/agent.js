@@ -34,6 +34,7 @@
     defineProperty: Object.defineProperty,
     getOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
     keys: Object.keys,
+    getPrototypeOf: Object.getPrototypeOf,
     stringify: JSON.stringify,
     now: (typeof performance !== 'undefined' && performance.now)
       ? performance.now.bind(performance) : function () { return Date.now(); },
@@ -444,15 +445,66 @@
       });
     });
     // Un Blob construido a partir de material etiquetado hereda la procedencia.
+    // No se marca DERIVED: un Blob es un envoltorio, los bytes viajan intactos
+    // dentro. Subir el .key dentro de un Blob es transmitir el .key.
     var NativeBlob = G.Blob;
     function FSBlob(parts, options) {
       var instance = new NativeBlob(parts || [], options);
       var labels = labelsOf(parts);
-      if (labels.length) { taint(instance, derive(labels)); }
+      if (labels.length) { taint(instance, labels); }
       return instance;
     }
     FSBlob.prototype = NativeBlob.prototype;
     try { G.Blob = FSBlob; } catch (e) { /* ignorado */ }
+  });
+
+  /* ================================================================ */
+  /* ACUMULADORES: FormData y URLSearchParams                          */
+  /* ================================================================ */
+  /*
+   * `form.append('key', blob, 'fiel.key')` es la forma mas comun de subir un
+   * fichero, y recorrer el FormData despues no basta: al anadir un Blob con
+   * nombre de archivo el navegador lo convierte en un File *nuevo*, de modo
+   * que la marca que llevaba el Blob original se pierde.
+   *
+   * La solucion es contaminar al contenedor en el momento de anadir: lo que
+   * entra en el FormData pasa a formar parte de el, y enviarlo equivale a
+   * enviar lo que contiene.
+   */
+  guard('form-data', function () {
+    [[G.FormData, 'FormData'], [G.URLSearchParams, 'URLSearchParams']].forEach(function (entry) {
+      var Ctor = entry[0];
+      if (!Ctor || !Ctor.prototype) { return; }
+      ['append', 'set'].forEach(function (method) {
+        wrap(Ctor.prototype, method, function (original) {
+          return function () {
+            var labels = [];
+            for (var i = 1; i < arguments.length; i++) {
+              labels = labels.concat(labelsOf(arguments[i]));
+            }
+            // La clave tambien puede delatar el contenido ("keyFile").
+            labels = labels.concat(labelsOf(arguments[0]));
+            if (labels.length) { taint(this, labels); }
+            return original.apply(this, arguments);
+          };
+        });
+      });
+    });
+
+    // Un FormData construido desde un <form> hereda lo que el formulario
+    // contiene; el constructor no pasa por append.
+    var NativeFormData = G.FormData;
+    if (!NativeFormData) { return; }
+    function FSFormData(form) {
+      var instance = arguments.length ? new NativeFormData(form) : new NativeFormData();
+      if (form) {
+        var labels = labelsOf(form);
+        if (labels.length) { taint(instance, labels); }
+      }
+      return instance;
+    }
+    FSFormData.prototype = NativeFormData.prototype;
+    try { G.FormData = FSFormData; } catch (e) { /* ignorado */ }
   });
 
   /* ================================================================ */
@@ -691,6 +743,34 @@
     });
   });
 
+  /*
+   * Propagacion a traves del troceado de bytes.
+   *
+   * Todo codigo que interpreta un formato binario trocea: recorrer un DER
+   * para extraer el criptograma del PKCS#8 son media docena de `slice`. Sin
+   * esta propagacion la procedencia se pierde en el primer corte y el .key
+   * llega a `subtle.decrypt` como si fueran bytes anonimos.
+   */
+  guard('typed-arrays', function () {
+    var TypedArray = O.getPrototypeOf(Int8Array);
+    if (TypedArray && TypedArray.prototype) {
+      ['slice', 'subarray'].forEach(function (method) {
+        wrap(TypedArray.prototype, method, function (original) {
+          return function () {
+            return taint(original.apply(this, arguments), labelsOf(this));
+          };
+        });
+      });
+    }
+    if (G.ArrayBuffer && G.ArrayBuffer.prototype) {
+      wrap(G.ArrayBuffer.prototype, 'slice', function (original) {
+        return function () {
+          return taint(original.apply(this, arguments), labelsOf(this));
+        };
+      });
+    }
+  });
+
   /* Propagacion a traves de codificadores frecuentes. */
   guard('encoders', function () {
     if (G.TextEncoder) {
@@ -730,6 +810,28 @@
   /* ================================================================ */
   /* SINKS: red                                                        */
   /* ================================================================ */
+  /* Lee una cabecera sea cual sea la forma en que el sitio la declaro. */
+  function headerValue(headers, name) {
+    if (!headers) { return ''; }
+    var lower = String(name).toLowerCase();
+    try {
+      if (G.Headers && headers instanceof G.Headers) { return headers.get(name) || ''; }
+      if (Array.isArray(headers)) {
+        for (var i = 0; i < headers.length; i++) {
+          if (headers[i] && String(headers[i][0]).toLowerCase() === lower) {
+            return String(headers[i][1]);
+          }
+        }
+        return '';
+      }
+      var keys = O.keys(headers);
+      for (var k = 0; k < keys.length; k++) {
+        if (String(keys[k]).toLowerCase() === lower) { return String(headers[keys[k]]); }
+      }
+    } catch (e) { /* ignorado */ }
+    return '';
+  }
+
   function reportEgress(type, info, body, source) {
     var labels = labelsOf(body);
     if (info.url) { labels = uniq(labels.concat(labelsOf(String(info.url)))); }
@@ -741,6 +843,7 @@
       kind: info.kind || '',
       body_type: describe(body),
       body_size: size,
+      content_type: info.content_type || '',
       private_data: isPrivate(labels),
       stack: stackFrames(5)
     };
@@ -776,7 +879,13 @@
           body = init ? init.body : null;
         }
       } catch (e) { /* ignorado */ }
-      reportEgress('NETWORK_REQUEST', { url: url, method: method, kind: 'fetch' }, body, source);
+      var contentType = '';
+      try {
+        contentType = headerValue(init && init.headers, 'content-type')
+          || ((G.Request && input instanceof G.Request) ? headerValue(input.headers, 'content-type') : '');
+      } catch (e) { /* ignorado */ }
+      reportEgress('NETWORK_REQUEST',
+        { url: url, method: method, kind: 'fetch', content_type: contentType }, body, source);
       return original.apply(this, arguments);
     };
     try { G.fetch.toString = function () { return original.toString(); }; } catch (e) { /* ignorado */ }
@@ -791,10 +900,19 @@
         return original.apply(this, arguments);
       };
     });
+    wrap(proto, 'setRequestHeader', function (original) {
+      return function (name, value) {
+        try {
+          if (String(name).toLowerCase() === 'content-type') { this.__fs_content_type = String(value); }
+        } catch (e) { /* ignorado */ }
+        return original.apply(this, arguments);
+      };
+    });
     wrap(proto, 'send', function (original) {
       return function (body) {
         reportEgress('NETWORK_REQUEST', {
-          url: this.__fs_url || '', method: this.__fs_method || 'GET', kind: 'xhr'
+          url: this.__fs_url || '', method: this.__fs_method || 'GET', kind: 'xhr',
+          content_type: this.__fs_content_type || ''
         }, body === undefined ? null : body, callsite());
         return original.apply(this, arguments);
       };
