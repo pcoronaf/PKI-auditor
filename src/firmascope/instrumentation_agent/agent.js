@@ -570,7 +570,15 @@
           return promise.then(function (result) {
             var outLabels;
             if (method === 'sign') {
-              outLabels = uniq([LBL.SIGNATURE].concat(derive(inLabels)));
+              // S3 + S5 --sign--> S6 es la transformacion legitima del modelo.
+              // La firma es el producto que la aplicacion debe enviar: no
+              // hereda la procedencia privada, porque hacerlo convertiria cada
+              // envio de firma de un sitio correcto en un falso positivo.
+              var publicLabels = [];
+              for (var li = 0; li < inLabels.length; li++) {
+                if (PRIVATE.indexOf(inLabels[li]) === -1) { publicLabels.push(inLabels[li]); }
+              }
+              outLabels = uniq([LBL.SIGNATURE].concat(publicLabels));
             } else if (method === 'decrypt') {
               // .key cifrado + contrasena -> clave privada en claro
               outLabels = derive(inLabels);
