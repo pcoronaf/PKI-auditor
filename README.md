@@ -57,6 +57,10 @@ Un caso sospechoso es `S3 --encrypt--> S7 [derived-from PRIVATE_KEY] --fetch()--
 el sistema no necesita interpretar el contenido de `S7`, le basta con establecer
 que el dato enviado deriva de material privado.
 
+La firma (`S6`) es el producto legítimo de la operación y **no** arrastra la
+procedencia privada: si lo hiciera, el envío de la firma — que todo sitio
+correcto debe hacer — se reportaría como exfiltración.
+
 ---
 
 ## Protección de secretos
@@ -113,6 +117,9 @@ Otras desviaciones deliberadas respecto de la especificación:
   ejecutado en el navegador sea byte a byte el del repositorio es más valioso
   que el tipado estático. Su SHA-256 se registra en `manifest.json`.
 - **Python 3.10+** en lugar de 3.12+, para ampliar la base de ejecución.
+- **El catálogo de reglas añade la categoría `code`** a las cuatro de la
+  especificación (`crypto`, `network`, `storage`, `efirma`), para las reglas que
+  provienen del análisis estático y no de un canal concreto.
 
 ---
 
@@ -129,17 +136,39 @@ Otras desviaciones deliberadas respecto de la especificación:
 | Observación de red por CDP y clasificación de terceros | implementado |
 | Controlador de navegador (perfil efímero, aislamiento de red, inventario de scripts) | implementado |
 | Credenciales sintéticas | implementado |
-| Analizador estático (AST + taint interprocedural) | **pendiente** |
+| Analizador estático (AST, taint interprocedural, source maps) | implementado, **sin verificar** |
+| Motor de reglas y catálogo `FS-*` (12 reglas) | implementado, **sin verificar** |
 | Motor de correlación | **pendiente** |
-| Motor de reglas y catálogo `FS-*` | **pendiente** |
 | Motor de reportes (HTML + JSON) | **pendiente** |
 | Addon de mitmproxy | **pendiente** |
 | CLI (`firmascope audit ...`) | **pendiente** |
-| Aplicaciones de laboratorio | **pendiente** |
+| Aplicaciones de laboratorio (lógica) | **pendiente** |
 | Pruebas TC-001..TC-006 | **pendiente** |
 
-Ningún módulo marcado “implementado” ha pasado todavía por una suíte de pruebas
-automatizada; se validaron con pruebas manuales durante el desarrollo.
+### Sobre “sin verificar”
+
+Ningún módulo ha pasado todavía por una suíte de pruebas automatizada.
+
+- Los módulos del núcleo (eventos, vault, expediente, credenciales, dominios) se
+  validaron con pruebas manuales durante el desarrollo: cadena de hashes,
+  detección de manipulación, redacción, coincidencia de canarios en base64 y
+  clasificación de dominios registrables.
+- El analizador estático y el motor de reglas se escribieron **sin poder
+  ejecutarlos**, por lo que deben tratarse como código sin verificar hasta que
+  exista la suíte de pruebas. El diseño se razonó contra el código real de las
+  aplicaciones de laboratorio, pero razonar no es ejecutar.
+
+La suíte mínima que cerrará esa brecha son los casos TC-001..TC-006 de la
+especificación, sobre las cinco aplicaciones de laboratorio.
+
+---
+
+## Documentación
+
+- [`docs/evidence-model.md`](docs/evidence-model.md) — expediente, cadena de
+  integridad y protección de secretos.
+- [`docs/rule-development.md`](docs/rule-development.md) — catálogo de reglas,
+  cómo escribir una nueva y cómo elegir el estado de conclusión.
 
 ---
 
