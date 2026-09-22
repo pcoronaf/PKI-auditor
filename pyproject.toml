@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "firmascope"
+version = "0.1.0"
+description = "Auditor defensivo de custodia de claves privadas en aplicaciones web de firma electronica (e.firma SAT)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "FirmaScope contributors" }]
+keywords = ["security", "audit", "e.firma", "SAT", "webcrypto", "taint-analysis"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Information Technology",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+]
+dependencies = [
+  "playwright>=1.40",
+  "cryptography>=41",
+  "PyYAML>=6",
+  "tree-sitter>=0.21",
+  "tree-sitter-javascript>=0.21",
+]
+
+[project.optional-dependencies]
+proxy = ["mitmproxy>=10"]
+dev = ["pytest>=7", "pytest-timeout>=2"]
+
+[project.scripts]
+firmascope = "firmascope.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/pcoronaf/PKI-auditor"
+Source = "https://github.com/pcoronaf/PKI-auditor"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["firmascope*"]
+
+[tool.setuptools.package-data]
+"firmascope.instrumentation_agent" = ["*.js"]
+"firmascope.evidence_store" = ["*.sql"]
+"firmascope.report_engine" = ["*.html", "*.css"]
+"firmascope.rule_engine" = ["rules/**/*.yaml"]
+"firmascope.labs" = ["apps/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "e2e: end-to-end tests that launch a real Chromium browser",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
