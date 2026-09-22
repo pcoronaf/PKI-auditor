@@ -11,10 +11,10 @@ description: |
 
   Se apoya en dos fuentes de evidencia independientes. La primera es el canario:
   FirmaScope conoce todas las representaciones de la credencial sintética y las
-  busca dentro de los cuerpos salientes, de modo que encontrar una prueba que
-  los bytes estaban ahí. La segunda es la instrumentación del navegador, que
-  etiqueta el dato en el momento en que se lee el archivo y sigue su procedencia
-  hasta el sumidero.
+  busca dentro de los cuerpos salientes, de modo que encontrar una de ellas
+  prueba que los bytes estaban ahí. La segunda es la instrumentación del
+  navegador, que etiqueta el dato en el momento en que se lee el archivo y sigue
+  su procedencia hasta el sumidero.
 rationale: |
   La clave privada de una e.firma es el elemento crítico del esquema: quien la
   posee, junto con la contraseña, puede firmar en nombre del titular. Un sitio
