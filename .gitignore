@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.audits/
+audits/
+*.sqlite
+*.sqlite-journal
+fixtures/synthetic-efirma/*.key
+fixtures/synthetic-efirma/*.cer
+fixtures/synthetic-efirma/*.json
+node_modules/
