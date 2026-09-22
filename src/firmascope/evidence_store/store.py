@@ -146,6 +146,7 @@ class EvidenceStore:
         self.db.executescript(SCHEMA)
         self._chain_head = chain.GENESIS
         self._listeners: list = []
+        self._closed = False
 
     # -- ciclo de vida --------------------------------------------------
     def open_session(self, target: str, config: dict, versions: dict, note: str = "") -> None:
@@ -165,6 +166,11 @@ class EvidenceStore:
         self.db.commit()
 
     def close(self) -> None:
+        """Cierra el expediente. Es idempotente a proposito: el cierre suele
+        ocurrir en un ``finally`` y no debe enmascarar el error que lo trajo."""
+        if self._closed:
+            return
+        self._closed = True
         try:
             self.db.commit()
         finally:
