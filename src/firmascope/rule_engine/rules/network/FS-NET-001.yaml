@@ -1,0 +1,28 @@
+id: FS-NET-001
+title: Comunicación con terceros tras el acceso a la clave
+category: network
+severity: MEDIUM
+summary: Dominios distintos al del sitio auditado recibieron tráfico después de que el navegador accediera al material de la clave.
+description: |
+  Toma como instante de referencia el primer acceso observado a material
+  privado (lectura del .key, lectura de la contraseña, importación o descifrado
+  de la clave) y agrupa por dominio registrable todas las peticiones a terceros
+  posteriores.
+
+  El dominio registrable se calcula con una lista de sufijos públicos reducida
+  que cubre los casos habituales (`.com.mx`, `.gob.mx`, `.co.uk`, plataformas de
+  alojamiento), de modo que `cdn.ejemplo.com.mx` y `www.ejemplo.com.mx` cuenten
+  como el mismo tercero.
+rationale: |
+  Este hallazgo es descriptivo, no acusatorio. Un CDN sirviendo una fuente o una
+  biblioteca de analítica enviando un evento de interfaz son tráfico normal en
+  ese instante.
+
+  Su valor está en hacer la pregunta contestable: el reporte enumera quién
+  recibió qué y cuándo, y deja al auditor decidir si alguna de esas
+  comunicaciones merece una revisión más profunda. Un script de tercero cargado
+  en la página que maneja la e.firma se ejecuta con los mismos privilegios que
+  el código del sitio.
+references:
+  - FR-002
+  - FR-015

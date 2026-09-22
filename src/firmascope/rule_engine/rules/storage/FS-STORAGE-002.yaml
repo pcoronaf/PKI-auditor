@@ -1,0 +1,18 @@
+id: FS-STORAGE-002
+title: Material privado escrito en localStorage
+category: storage
+severity: HIGH
+summary: Se escribió material de clave privada en localStorage.
+description: |
+  Observa las llamadas a `Storage.setItem()` sobre `localStorage` cuyo valor
+  lleva la etiqueta de procedencia del archivo .key o de la clave privada
+  descifrada.
+rationale: |
+  localStorage es sincrónico, legible por cualquier script del origen y
+  persistente hasta que alguien lo borra explícitamente. No ofrece cifrado,
+  caducidad ni compartimentación.
+
+  Es, además, el primer sitio que inspecciona quien obtiene ejecución de código
+  en la página, por ejemplo a través de una dependencia comprometida.
+references:
+  - TC-005

@@ -1,0 +1,19 @@
+id: FS-STORAGE-001
+title: Material privado escrito en IndexedDB
+category: storage
+severity: HIGH
+summary: Se escribió material de clave privada en IndexedDB.
+description: |
+  Observa las llamadas a `IDBObjectStore.put()` y `IDBObjectStore.add()` cuyo
+  valor lleva la etiqueta de procedencia del archivo .key o de la clave privada
+  descifrada.
+rationale: |
+  IndexedDB es almacenamiento persistente de gran capacidad, pensado para datos
+  estructurados y binarios: es el lugar natural donde acabaría una clave privada
+  que se guarda "para no volver a pedirla".
+
+  Una clave privada no debería sobrevivir a la operación de firma. Si persiste,
+  queda expuesta a cualquier script del mismo origen y a quien tenga acceso al
+  perfil del navegador.
+references:
+  - TC-005

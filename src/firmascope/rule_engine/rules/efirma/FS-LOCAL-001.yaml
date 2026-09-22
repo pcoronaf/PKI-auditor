@@ -1,0 +1,25 @@
+id: FS-LOCAL-001
+title: Firma generada con la red deshabilitada
+category: efirma
+severity: INFO
+summary: Se demostró que la operación de firma se completa con el navegador aislado de la red.
+description: |
+  Es la única regla del catálogo que puede emitir CONFIRMED, porque descansa en
+  un experimento y no en una observación pasiva: FirmaScope desconecta la red
+  del navegador sin cerrarlo, el operador completa la firma, y la regla comprueba
+  si la operación criptográfica ocurrió dentro de la ventana de aislamiento.
+
+  El resultado se expresa como "firma local demostrada bajo las condiciones
+  probadas". El reporte nunca traduce esto a "sitio seguro".
+rationale: |
+  Que la firma se complete sin red establece un hecho fuerte y difícil de
+  falsear: la clave privada se usó en el equipo del usuario. Es la evidencia más
+  valiosa que puede producir la herramienta a favor de un sitio.
+
+  No es, sin embargo, una garantía de que nada salga: un sitio puede firmar
+  localmente y aun así transmitir una copia de la clave al recuperar la red. Por
+  eso esta regla se lee junto a FS-KEY-001, FS-KEY-002 y FS-NET-002, nunca sola.
+references:
+  - FR-007
+  - FR-008
+  - TC-001

@@ -1,0 +1,27 @@
+id: FS-KEY-002
+title: Datos derivados de la clave privada transmitidos
+category: efirma
+severity: CRITICAL
+summary: Salieron datos cuya procedencia se remonta a la clave privada, aunque su contenido sea opaco.
+description: |
+  Detecta la exfiltración indirecta: el material privado se transforma antes de
+  salir (se cifra con una clave pública del servidor, se comprime, se codifica o
+  se empaqueta) y el cuerpo resultante parece ruido aleatorio para una
+  inspección de red convencional.
+
+  FirmaScope no necesita interpretar el contenido transmitido. Le basta con
+  establecer que el dato enviado deriva, directa o indirectamente, de material
+  privado: la instrumentación etiqueta el valor en su origen y propaga esa
+  procedencia a través de las transformaciones observadas.
+
+  Cuando no se observa la ejecución pero el análisis estático encuentra una ruta
+  equivalente en el código, la regla reporta POTENTIAL en lugar de OBSERVED.
+rationale: |
+  Una revisión que sólo busque "¿se envió el archivo .key?" no detecta este
+  caso. Cifrar la clave con la clave pública del servidor antes de subirla la
+  entrega igualmente al servidor: el cifrado protege el dato frente a terceros
+  en tránsito, no frente al destinatario.
+references:
+  - FR-010
+  - FR-015
+  - TC-004

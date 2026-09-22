@@ -1,0 +1,21 @@
+id: FS-CRYPTO-001
+title: Clave privada exportada
+category: crypto
+severity: HIGH
+summary: La aplicación llamó a exportKey() sobre una clave privada.
+description: |
+  Observa las llamadas a `crypto.subtle.exportKey()` cuyo objeto es una
+  CryptoKey de tipo `private`, o cuyo resultado lleva la etiqueta de procedencia
+  de la clave privada. Las exportaciones de claves públicas se ignoran: son
+  material público y su exportación es rutinaria.
+rationale: |
+  Mientras la clave vive dentro de un objeto CryptoKey no extraíble, el
+  navegador garantiza que su material no vuelve a JavaScript: el código puede
+  firmar con ella, pero no leerla. Exportarla rompe esa garantía y coloca los
+  bytes al alcance de cualquier ruta de código de la página.
+
+  La exportación puede ser legítima (por ejemplo, para volver a cifrar la clave
+  antes de guardarla), pero es el punto exacto donde deja de existir una
+  barrera técnica y empieza a depender sólo de la buena conducta del código.
+references:
+  - FR-006
