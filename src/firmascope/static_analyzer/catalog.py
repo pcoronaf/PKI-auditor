@@ -71,19 +71,46 @@ CRYPTO_TRANSFORMS = frozenset(
     }
 )
 
-#: Funciones que transforman un valor sin perder su procedencia.
-TRANSFORMS = frozenset(
+#: Transformaciones *reversibles*: cambian la representacion, no el contenido.
+#:
+#: Un .key en base64 sigue siendo el .key — quien reciba esos bytes tiene la
+#: clave. Por eso atravesar una de estas funciones no convierte el dato en
+#: "derivado": la transmision se sigue considerando directa (FS-KEY-001).
+REVERSIBLE_TRANSFORMS = frozenset(
     {
         "btoa", "atob", "encodeURI", "encodeURIComponent", "decodeURIComponent",
         "stringify", "parse", "encode", "decode", "toBase64", "fromBase64",
         "toString", "slice", "subarray", "join", "concat", "map", "from",
         "hex", "toHex", "fromHex", "buffer", "bytes", "serialize", "pack",
-        "compress", "deflate", "gzip", "cipher", "seal", "wrap", "obfuscate",
     }
 )
 
+#: Transformaciones que *oscurecen* el dato: el contenido deja de ser legible
+#: para quien observa el canal. La procedencia se conserva, pero la salida ya
+#: no es el material original (FS-KEY-002).
+OBSCURING_TRANSFORMS = frozenset(
+    {
+        "compress", "deflate", "gzip", "cipher", "seal", "wrap", "obfuscate",
+        "encrypt", "digest", "wrapKey", "deriveBits", "deriveKey",
+    }
+)
+
+#: Funciones que transforman un valor sin perder su procedencia.
+TRANSFORMS = REVERSIBLE_TRANSFORMS | OBSCURING_TRANSFORMS
+
 #: Constructores que envuelven datos conservando la procedencia.
 TRANSFORM_CONSTRUCTORS = frozenset({"Blob", "File", "FormData", "URLSearchParams", "Uint8Array", "DataView"})
+
+#: Metodos que *acumulan* el argumento dentro del objeto receptor.
+#:
+#: A diferencia de una transformacion, aqui el dato no se consume: pasa a
+#: formar parte del receptor. Un ``FormData`` al que se le anadio el .key
+#: transporta el .key, y enviarlo equivale a enviar la clave. Sin esta regla
+#: el patron ``form.append('key', blob); fetch(url, {body: form})`` — el mas
+#: comun para subir un fichero — quedaria fuera del analisis.
+ACCUMULATOR_METHODS = frozenset(
+    {"append", "set", "add", "push", "unshift", "enqueue", "insert", "write"}
+)
 
 
 # ----------------------------------------------------------------------
@@ -198,6 +225,19 @@ def match_pattern(patterns: tuple[CallPattern, ...], member: str, object_text: s
 
 def is_transform(name: str) -> bool:
     return name in TRANSFORMS or name in CRYPTO_TRANSFORMS
+
+
+def obscures(name: str) -> bool:
+    """True si la transformacion vuelve opaco el contenido transmitido.
+
+    Determina si una salida se reporta como transmision *directa* del material
+    (FS-KEY-001) o como salida de un dato *derivado* de el (FS-KEY-002). El
+    nombre puede venir cualificado (``crypto.subtle.encrypt``), asi que se
+    compara tambien el ultimo segmento.
+    """
+    if not name:
+        return False
+    return name in OBSCURING_TRANSFORMS or name.rsplit(".", 1)[-1] in OBSCURING_TRANSFORMS
 
 
 def looks_like_egress_name(name: str) -> bool:

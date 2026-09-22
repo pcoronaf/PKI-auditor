@@ -374,6 +374,21 @@ class ScriptAnalysis:
                 fn.variables[name] = merged
                 self._changed = True
 
+        # Un parametro que ningun llamante conocido alimenta puede seguir
+        # transportando material sensible: es el caso de los callbacks
+        # (`onSign(keyBytes, password)`), cuyo invocador esta en otro script o
+        # es una API del navegador. Se siembra por heuristica de nombre, que
+        # produce confianza baja y exige revision manual.
+        for param in fn.params:
+            if not fn.param_taint.get(param, EMPTY).empty:
+                continue
+            if not fn.variables.get(param, EMPTY).empty:
+                continue
+            seed = self._name_seed(param, fn.node, "parametro")
+            if not seed.empty:
+                fn.variables[param] = seed
+                self._changed = True
+
         body = parser.field(fn.node, "body") or fn.node
         # Dos pasadas: la segunda recoge usos anteriores a la declaracion
         # (hoisting, bucles) sin necesidad de un analisis de flujo completo.
@@ -489,6 +504,20 @@ class ScriptAnalysis:
                 pattern=pattern, node=node, data_nodes=data_nodes, url_node=url_node,
                 function=fn, line=parser.line_of(node),
                 snippet=parser.snippet(node, self.source)))
+
+        # 4b. Acumuladores: `form.append('key', blob)` contamina a `form`.
+        # Solo cuando la llamada no era ya un sumidero, para no reinterpretar
+        # `localStorage.setItem(...)` — que consume el dato — como acumulacion.
+        if (pattern is None and member_name in catalog.ACCUMULATOR_METHODS
+                and object_node is not None and object_node.type == "identifier"):
+            incoming = EMPTY
+            for arg in args:
+                incoming = incoming.merge(self._taint_of(arg, fn))
+            if not incoming.empty:
+                # No es una transformacion que oscurezca el dato: los bytes
+                # siguen ahi, de modo que el resultado no se marca derivado.
+                self._assign(fn, parser.text(object_node, self.source),
+                             incoming.through(member_name, derived=False))
 
         # 5. Grafo de llamadas hacia funciones locales.
         target_name = callee_text if callee.type == "identifier" else member_name
@@ -627,7 +656,10 @@ class ScriptAnalysis:
             if result.empty:
                 return EMPTY
             if name in catalog.TRANSFORM_CONSTRUCTORS:
-                return result.through(f"new {name}", derived=name not in ("Uint8Array", "DataView"))
+                # Todos son envoltorios (Blob, FormData, Uint8Array...): el
+                # contenido viaja intacto dentro, asi que la salida sigue
+                # siendo una transmision directa del material.
+                return result.through(f"new {name}", derived=False)
             return result
 
         if kind in ("object", "array", "arguments", "template_string", "template_substitution",
@@ -713,19 +745,20 @@ class ScriptAnalysis:
             if incoming.empty and labels:
                 return TaintValue(labels=frozenset(labels), origin=source)
             if not incoming.empty:
-                value = incoming.through(pattern.name)
+                value = incoming.through(pattern.name, derived=catalog.obscures(pattern.name))
                 if value.origin is None:
                     value = TaintValue(value.labels, source, value.hops, value.transforms, value.derived)
                 return value.with_labels(labels)
 
         if incoming.empty:
             return EMPTY
+        name = member_name or callee_text
         if catalog.is_transform(member_name) or catalog.is_transform(callee_text):
-            return incoming.through(member_name or callee_text)
+            return incoming.through(name, derived=catalog.obscures(name))
         if object_node is not None:
             base = self._taint_of(object_node, fn, depth + 1)
             if not base.empty:
-                return incoming.merge(base).through(member_name or callee_text)
+                return incoming.merge(base).through(name, derived=catalog.obscures(name))
         return incoming.through(member_name or callee_text, derived=False)
 
     def _callee_parts(self, callee: Any) -> tuple[str, Any | None]:
@@ -741,14 +774,14 @@ class ScriptAnalysis:
             return []
         return [child for child in container.named_children if child.type != "comment"]
 
-    def _name_seed(self, name: str, node: Any) -> TaintValue:
+    def _name_seed(self, name: str, node: Any, kind: str = "identificador") -> TaintValue:
         """Siembra por heuristica de nombre, con confianza baja."""
         labels = catalog.infer_labels(name)
         if not labels:
             return EMPTY
         return TaintValue(
             labels=frozenset(labels),
-            origin=SourceRef(f"identificador: {name}", "name", parser.line_of(node),
+            origin=SourceRef(f"{kind}: {name}", "name", parser.line_of(node),
                              parser.snippet(node, self.source)),
         )
 
