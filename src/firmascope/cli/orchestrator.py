@@ -88,7 +88,8 @@ class Auditor:
 
     def __init__(self, config: AuditConfig, session_id: str | None = None,
                  on_event: Callable[[Event], None] | None = None,
-                 operator: Operator | None = None):
+                 operator: Operator | None = None,
+                 on_stage: Callable[[str], None] | None = None):
         self.config = config
         self.session_id = session_id or new_session_id()
         self.on_event = on_event
@@ -101,6 +102,7 @@ class Auditor:
         self.proxy_addon: Any | None = None
         self.proxy_note = ""
         self.operator = operator
+        self.on_stage = on_stage
         self.session_note = ""
         if config.manual and operator is None:
             raise ValueError("el modo manual necesita un operador")
@@ -142,6 +144,7 @@ class Auditor:
         """Recorre el objetivo con el navegador instrumentado."""
         from ..browser_controller.controller import BrowserController
 
+        self._stage("abrir")
         session_state = self._load_session()
         self._start_proxy()
         controller = BrowserController(
@@ -199,6 +202,13 @@ class Auditor:
             f"{protected} valores protegidos de la escritura a disco.")
         return state
 
+    def _stage(self, name: str) -> None:
+        if self.on_stage is not None:
+            try:
+                self.on_stage(name)
+            except Exception:  # pragma: no cover - el panel no debe tumbar la auditoria
+                pass
+
     def _ask_operator(self, controller, step: str, message: str) -> None:
         self.operator(OperatorStep(
             step=step, message=message, page=controller.page,
@@ -225,6 +235,17 @@ class Auditor:
                 "El operador aporta las credenciales; FirmaScope no rellena el formulario.")
             return
 
+        if self.config.manual:
+            # Primero lo que la plataforma exija antes de firmar: iniciar
+            # sesion, cargar el documento, avanzar pasos. Las credenciales
+            # sinteticas aun no se muestran, para que no se usen antes.
+            controller.checkpoint("operador-prepara", "pasos previos a la firma")
+            self._ask_operator(controller, "preparar", (
+                "Si la plataforma lo necesita, inicia sesion y completa los pasos previos "
+                "(por ejemplo, cargar un documento de PRUEBA, sin informacion real) hasta "
+                "llegar al formulario de firma.\n"
+                "Todavia no uses ninguna credencial de e.firma."))
+
         credential = generator.generate()
         credential.write(self.output_dir / "credentials", stem="lab")
         credential.register(self.vault)
@@ -235,8 +256,7 @@ class Auditor:
             # credenciales sinteticas y firma. FirmaScope observa.
             controller.checkpoint("operador-inicia", "firma conducida por el operador")
             self._ask_operator(controller, "firmar", (
-                "Lleva el navegador hasta el formulario de firma y firma usando SOLO estas "
-                "credenciales sinteticas:\n"
+                "Firma en el formulario usando SOLO estas credenciales sinteticas:\n"
                 f"  .key:        {credential.key_path}\n"
                 f"  .cer:        {credential.cert_path}\n"
                 f"  contrasena:  {credential.password}"))
@@ -333,6 +353,7 @@ class Auditor:
     # ------------------------------------------------------------------
     def _analyze(self, result: AuditResult) -> AuditResult:
         """Analisis estatico, correlacion, reglas y reportes."""
+        self._stage("analizar")
         events = self.store.events()
         requests = self.store.requests()
         scripts = self.store.scripts()

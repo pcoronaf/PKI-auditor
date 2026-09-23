@@ -57,6 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--manual", action="store_true",
                        help="conducir la firma a mano: FirmaScope espera y observa "
                             "(implica --headed)")
+    audit.add_argument("--panel", action="store_true",
+                       help="panel de control en el navegador habitual: etapas, credenciales "
+                            "y eventos en vivo (implica --manual)")
     audit.add_argument("--session", type=Path, metavar="FICHERO",
                        help="sesion autenticada guardada con 'firmascope login'")
     audit.add_argument("--no-sandbox", dest="sandbox", action="store_false", default=None,
@@ -147,9 +150,9 @@ def cmd_audit(args: argparse.Namespace) -> int:
         target=args.target,
         level=level,
         output_dir=args.output,
-        headless=not (args.headed or args.manual),
+        headless=not (args.headed or args.manual or args.panel),
         session_state=args.session,
-        manual=args.manual,
+        manual=args.manual or args.panel,
         sandbox=args.sandbox,
         capture_bodies=args.capture_bodies,
         rules_dirs=list(args.rules),
@@ -171,6 +174,9 @@ def cmd_audit(args: argparse.Namespace) -> int:
             print("Navegador visible: FirmaScope conduce la sesion. Usa --manual para operarla tu.")
         print()
 
+    if args.panel:
+        return _audit_with_panel(config, args)
+
     auditor = Auditor(config, operator=terminal_operator if args.manual else None)
     result = auditor.run(dwell=args.dwell, offline_dwell=args.offline_dwell)
 
@@ -182,6 +188,54 @@ def cmd_audit(args: argparse.Namespace) -> int:
     if result.error:
         return 1
     return 0
+
+
+def _audit_with_panel(config: AuditConfig, args: argparse.Namespace) -> int:
+    """Auditoria conducida desde el panel de control.
+
+    El panel corre en su propio hilo; la auditoria, con Playwright, en este.
+    Al terminar, el panel queda abierto con el resultado hasta que la persona
+    lo cierre (boton del panel o Enter en la terminal).
+    """
+    import threading
+    import webbrowser
+
+    from ..panel import PanelServer, PanelState, panel_operator
+    from .orchestrator import Auditor
+
+    state = PanelState(config.target, int(config.level), config.offline_test)
+    server = PanelServer(state).start()
+    try:
+        print("Panel de control:")
+        print(f"  {server.url}")
+        print("La direccion lleva un token de acceso: no la compartas.")
+        try:
+            webbrowser.open(server.url)
+        except Exception:
+            print("No se pudo abrir el navegador; abre la direccion a mano.")
+        print()
+
+        auditor = Auditor(config, operator=panel_operator(state),
+                          on_event=state.add_event, on_stage=state.set_stage)
+        result = auditor.run(dwell=args.dwell, offline_dwell=args.offline_dwell)
+        for note in (result.session_note, result.proxy_note, result.credentials_note):
+            state.add_note(note)
+        state.finish(result)
+
+        if args.json:
+            print(json.dumps(_result_json(result), indent=2, ensure_ascii=False, default=str))
+        else:
+            _print_result(result)
+
+        print()
+        print("El panel sigue abierto con el resultado. Cierralo desde el panel o pulsa Enter aqui.")
+        threading.Thread(target=lambda: (sys.stdin.readline(), state.request_close()),
+                         daemon=True).start()
+        while not state.wait_closed(0.5):
+            pass
+    finally:
+        server.stop()
+    return 1 if result.error else 0
 
 
 def terminal_operator(step) -> None:

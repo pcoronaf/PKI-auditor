@@ -465,7 +465,9 @@ def test_modo_manual_con_prueba_de_aislamiento(lab, tmp_path, sesion):
 
     def operador(step):
         pasos.append(step.step)
-        if step.step == "firmar":
+        if step.step == "preparar":
+            assert step.credential is None, "las credenciales no se dan antes de firmar"
+        elif step.step == "firmar":
             assert step.credential is not None
             assert str(step.credential.key_path) in step.message
             forms.submit(step.page, forms.provide(step.page, step.credential))
@@ -474,6 +476,108 @@ def test_modo_manual_con_prueba_de_aislamiento(lab, tmp_path, sesion):
         step.wait(3.0)
 
     _, result = _audit_login(lab, tmp_path, session_state=sesion, manual=True, operator=operador)
-    assert pasos == ["firmar", "firmar-aislado"]
+    assert pasos == ["preparar", "firmar", "firmar-aislado"]
     assert status_of(result, "FS-LOCAL-001") is Status.CONFIRMED
     assert status_of(result, "FS-KEY-001") is Status.NOT_OBSERVED
+
+
+
+# ----------------------------------------------------------------------
+# Panel de control
+# ----------------------------------------------------------------------
+
+def _post_next(server) -> None:
+    """Lo que hace el boton "Siguiente etapa" del panel."""
+    import urllib.request
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener.open(urllib.request.Request(
+        f"http://127.0.0.1:{server.port}/api/next", method="POST",
+        headers={"X-FS-Token": server.token}), timeout=5).read()
+
+
+def test_panel_la_pagina_funciona_en_un_navegador(tmp_path):
+    """La pagina real: muestra la etapa y las credenciales, el boton avanza, y
+    lo que viene del sitio auditado se pinta como texto, nunca como HTML."""
+    from types import SimpleNamespace
+
+    from playwright.sync_api import sync_playwright
+
+    from firmascope.browser_controller.launch import launch_chromium
+    from firmascope.panel import PanelServer, PanelState
+
+    from conftest import egress
+
+    state = PanelState("https://sitio.example/firmar", 3, offline_test=True)
+    hostil = egress(1.0, tags=[Tag.KEY_FILE], url="https://evil.example/c", third_party=True)
+    hostil.data["method"] = "<img src=x onerror=window.__xss=1>"
+    hostil.seq = 1
+    state.add_event(hostil)
+    state.ask("firmar", "Firma en el formulario usando SOLO estas credenciales sinteticas:",
+              SimpleNamespace(key_path="/tmp/lab.key", cert_path="/tmp/lab.cer",
+                              password="contrasena-sintetica"))
+
+    with PanelServer(state) as server, sync_playwright() as p:
+        browser = launch_chromium(p, headless=True, executable_path=default_chromium_path())
+        page = browser.new_page()
+        errores = []
+        page.on("pageerror", lambda e: errores.append(str(e)))
+        page.goto(server.url)
+        page.wait_for_function("document.getElementById('cred-pwd').textContent.length > 0")
+
+        assert page.text_content("#cred-pwd") == "contrasena-sintetica"
+        assert page.is_visible("text=Usa solo estas credenciales") or page.is_visible("#cred-box")
+        assert "private" in page.get_attribute("#events tr", "class")
+        assert page.evaluate("window.__xss") is None, "el panel ejecuto HTML del sitio auditado"
+        assert "<img" in page.text_content("#events"), "el contenido hostil debe verse como texto"
+
+        page.click("#next")
+        page.wait_for_function("document.getElementById('next').disabled")
+        assert state.advanced
+        assert errores == [], errores
+        browser.close()
+
+
+def test_panel_conduce_una_auditoria_completa(lab, tmp_path, sesion):
+    """demo-login de principio a fin desde el panel: la persona actua en el
+    navegador de auditoria y pulsa "Siguiente etapa" en el panel."""
+    import threading
+
+    from firmascope.browser_controller import forms
+    from firmascope.panel import PanelServer, PanelState, panel_operator
+
+    state = PanelState(lab.url_for("demo-login"), 3, offline_test=True)
+    with PanelServer(state) as server:
+        del_panel = panel_operator(state)
+
+        def persona(step):
+            if step.step == "firmar":
+                forms.submit(step.page, forms.provide(step.page, step.credential))
+            elif step.step == "firmar-aislado":
+                forms.submit(step.page, forms.detect(step.page))
+            threading.Timer(2.0, _post_next, args=(server,)).start()
+            del_panel(step)
+
+        config = AuditConfig(target=lab.url_for("demo-login"), level=AuditLevel.LOCAL_SIGNING_TEST,
+                             output_dir=tmp_path / "audits", session_state=sesion, manual=True)
+        config.headless = True
+        auditor = Auditor(config, operator=persona, on_event=state.add_event,
+                          on_stage=state.set_stage)
+        result = auditor.run(dwell=2.0, offline_dwell=2.0)
+        state.finish(result)
+
+        snap = state.snapshot()
+        assert [s["status"] for s in snap["stages"]] == ["done"] * 6
+        assert snap["counters"]["key_reads"] >= 1
+        assert snap["counters"]["signatures"] >= 2, "firma normal y firma con la red aislada"
+        assert snap["counters"]["egress_private"] == 0
+        assert snap["result"]["error"] == ""
+        assert snap["has_report"]
+        assert status_of(result, "FS-LOCAL-001") is Status.CONFIRMED
+
+        # Lo que el panel expone sale de eventos ya redactados: ni la cookie
+        # de sesion aparece en su estado.
+        import json
+        tokens = [c["value"] for c in json.loads(sesion.read_text())["cookies"]]
+        texto = json.dumps(snap)
+        assert all(t not in texto for t in tokens)

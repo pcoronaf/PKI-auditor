@@ -144,9 +144,10 @@ Otras desviaciones deliberadas respecto de la especificación:
 | CLI (`firmascope audit ...`) | implementado, con pruebas |
 | Aplicaciones de laboratorio | implementadas, con pruebas e2e |
 | Addon de mitmproxy (nivel 4, CA efímera) | implementado, con pruebas e2e |
+| Panel de control local (`--panel`) | implementado, con pruebas e2e |
 | Pruebas TC-001..TC-006 | **verdes** |
 
-La suíte son 224 pruebas unitarias más 23 extremo a extremo que lanzan un
+La suíte son 241 pruebas unitarias más 25 extremo a extremo que lanzan un
 Chromium real contra las nueve aplicaciones de laboratorio (dos de ellas en
 nivel 4, con el proxy interpuesto):
 
@@ -262,6 +263,39 @@ sintéticas que debes usar y espera a que firmes. En nivel 3 o superior te
 pide después **repetir la firma con la red aislada**: si la aplicación firma
 sin red, `FS-LOCAL-001` queda CONFIRMADO, que es la evidencia más fuerte que la
 herramienta puede dar a favor de un sitio.
+
+### El panel de control (`--panel`)
+
+Si antes de firmar hay que hacer un recorrido (iniciar sesión, cargar un
+documento, rellenar datos), la opción `--panel` guía la auditoría desde una
+página local que se abre en tu navegador habitual, al lado del navegador de
+auditoría:
+
+```powershell
+firmascope audit https://plataforma.example/firmar --session sesion.json --panel
+```
+
+El panel muestra las etapas (abrir → preparación → firma → firma con la red
+aislada → análisis → reporte), qué hacer en cada una, las credenciales
+sintéticas con botones de copiar (rutas absolutas, listas para el selector de
+archivos) y los eventos que los sensores van observando, con las salidas de
+material privado resaltadas. El botón **Siguiente etapa** sustituye al Enter
+del modo `--manual`; al terminar, el panel enlaza el reporte completo.
+
+- **Preparación**: haz en el navegador de auditoría los pasos previos. Si hay
+  que cargar un documento, usa uno de **prueba, sin información real**. Aún no
+  uses ninguna credencial.
+- **Firma**: firma con las credenciales sintéticas que muestra el panel, nunca
+  con tu e.firma real.
+- **Firma con la red aislada** (nivel 3+): repite la firma; el panel avisa de
+  que la red está cortada.
+
+El panel escucha solo en `127.0.0.1`, en un puerto aleatorio, y exige un token
+aleatorio que va en la URL que imprime la terminal: **no compartas esa URL**.
+Rechaza cabeceras `Host` ajenas (DNS rebinding), las órdenes exigen el token en
+una cabecera propia que una web ajena no puede añadir, la página lleva una CSP
+estricta con nonce y todo lo que proviene del sitio auditado se pinta como
+texto. Lo que muestra sale de los eventos ya redactados por el expediente.
 
 El fichero de sesión es una credencial: permite entrar en la cuenta mientras la
 sesión siga activa. Se escribe con permisos `0600`, sus valores se protegen en

@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>FirmaScope — panel de auditoria</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9; --panel: #ffffff; --fg: #17191c; --muted: #5b6168; --line: #e1e4e8;
+  --accent: #1f4f8f; --accent-fg: #ffffff; --ok: #2c6b3f; --warn: #8a6a08; --bad: #a3261f;
+  --third: #b3410f; --chip: #eef1f4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418; --panel: #181c21; --fg: #e8eaed; --muted: #9aa3ad; --line: #2a3037;
+    --accent: #79a9e8; --accent-fg: #0d1117; --ok: #86ca9e; --warn: #e3c874; --bad: #f08b8b;
+    --third: #f0ae7d; --chip: #222830;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+       font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+         display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline; }
+header h1 { font-size: 16px; margin: 0; }
+header .target { color: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace;
+                 font-size: 12.5px; word-break: break-all; }
+[hidden] { display: none !important; }
+main { display: grid; grid-template-columns: minmax(300px, 420px) 1fr; gap: 16px; padding: 16px 20px;
+       max-width: 1400px; margin: 0 auto; }
+@media (max-width: 860px) { main { grid-template-columns: 1fr; padding: 12px; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px;
+        margin-bottom: 16px; }
+.card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+           margin: 0 0 10px; }
+ol.stages { list-style: none; margin: 0; padding: 0; }
+ol.stages li { display: flex; gap: 10px; align-items: center; padding: 6px 0; color: var(--muted); }
+ol.stages li .dot { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line);
+                    flex: none; display: grid; place-items: center; font-size: 11px; font-weight: 700; }
+ol.stages li.active { color: var(--fg); font-weight: 600; }
+ol.stages li.active .dot { border-color: var(--accent); background: var(--accent); color: var(--accent-fg); }
+ol.stages li.done .dot { border-color: var(--ok); color: var(--ok); }
+ol.stages li.skipped { text-decoration: line-through; opacity: .6; }
+.instructions { white-space: pre-wrap; margin: 0 0 12px; }
+.idle { color: var(--muted); }
+button { font: inherit; border-radius: 6px; border: 1px solid var(--line); background: var(--chip);
+         color: var(--fg); padding: 6px 12px; cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
+                 font-weight: 600; padding: 9px 16px; width: 100%; }
+button:disabled { opacity: .45; cursor: default; }
+.cred { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 10px; align-items: center;
+        margin: 10px 0 14px; font-size: 13px; }
+.cred .k { color: var(--muted); }
+.cred code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; word-break: break-all;
+             background: var(--chip); padding: 3px 6px; border-radius: 4px; }
+.warnbox { border-left: 3px solid var(--warn); padding: 6px 10px; background: var(--chip);
+           border-radius: 0 6px 6px 0; font-size: 13px; margin-bottom: 12px; }
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.tile { background: var(--chip); border-radius: 6px; padding: 8px 10px; }
+.tile .n { display: block; font-size: 20px; font-weight: 600; }
+.tile .l { color: var(--muted); font-size: 11.5px; }
+.tile.bad .n { color: var(--bad); }
+.tile.third .n { color: var(--third); }
+.feed { max-height: calc(100vh - 230px); overflow-y: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; position: sticky;
+     top: 0; background: var(--panel); }
+td.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; word-break: break-all; }
+tr.private td { background: color-mix(in srgb, var(--bad) 14%, transparent); }
+tr.third td { background: color-mix(in srgb, var(--third) 10%, transparent); }
+tr.warn td { color: var(--warn); }
+.tag { display: inline-block; font-size: 10.5px; padding: 1px 6px; border-radius: 999px; background: var(--chip);
+       margin: 1px 2px 1px 0; }
+.tag.p { background: var(--bad); color: var(--panel); }
+.findings li { margin: 4px 0; }
+.st { font-weight: 700; font-size: 11px; letter-spacing: .04em; }
+.st.CONFIRMED, .st.OBSERVED { color: var(--bad); }
+.st.POTENTIAL { color: var(--warn); }
+.st.NOT_OBSERVED { color: var(--ok); }
+.st.INCONCLUSIVE { color: var(--muted); }
+.notes { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; padding-left: 18px; }
+a.report { display: block; text-align: center; background: var(--accent); color: var(--accent-fg);
+           border-radius: 6px; padding: 9px; font-weight: 600; text-decoration: none; margin: 10px 0; }
+.offline { color: var(--bad); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>FirmaScope — panel de auditoria</h1>
+  <span class="target" id="target"></span>
+  <span class="target" id="level"></span>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h2>Etapas</h2>
+      <ol class="stages" id="stages"></ol>
+    </div>
+    <div class="card" id="step-card">
+      <h2 id="step-title">En curso</h2>
+      <p class="instructions idle" id="instructions">Esperando a que el navegador de auditoria abra la plataforma...</p>
+      <div id="cred-box" hidden>
+        <div class="warnbox">Usa <strong>solo</strong> estas credenciales sinteticas de laboratorio. Nunca tu e.firma real.</div>
+        <div class="cred">
+          <span class="k">.key</span><code id="cred-key"></code><button data-copy="cred-key">Copiar</button>
+          <span class="k">.cer</span><code id="cred-cer"></code><button data-copy="cred-cer">Copiar</button>
+          <span class="k">Contrasena</span><code id="cred-pwd"></code><button data-copy="cred-pwd">Copiar</button>
+        </div>
+      </div>
+      <button class="primary" id="next" disabled>Siguiente etapa</button>
+      <ul class="notes" id="notes"></ul>
+    </div>
+    <div class="card" id="result-card" hidden>
+      <h2>Resultado</h2>
+      <p id="result-summary"></p>
+      <a class="report" id="report-link" target="_blank" rel="noopener" hidden>Abrir el reporte completo</a>
+      <ul class="findings" id="findings"></ul>
+      <button id="close">Cerrar el panel</button>
+    </div>
+  </section>
+  <section>
+    <div class="card">
+      <h2>Lo observado</h2>
+      <div class="tiles">
+        <div class="tile"><span class="n" id="c-key">0</span><span class="l">lecturas del .key</span></div>
+        <div class="tile"><span class="n" id="c-crypto">0</span><span class="l">operaciones criptograficas</span></div>
+        <div class="tile"><span class="n" id="c-sign">0</span><span class="l">firmas</span></div>
+        <div class="tile"><span class="n" id="c-egress">0</span><span class="l">salidas de red</span></div>
+        <div class="tile third"><span class="n" id="c-third">0</span><span class="l">hacia terceros</span></div>
+        <div class="tile bad"><span class="n" id="c-private">0</span><span class="l">con material privado</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Eventos en vivo</h2>
+      <div class="feed" id="feed">
+        <table>
+          <thead><tr><th>Hora</th><th>Evento</th><th>Destino / detalle</th><th>Etiquetas</th><th>Sensor</th></tr></thead>
+          <tbody id="events"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+<script nonce="__NONCE__">
+(function () {
+  'use strict';
+  var token = new URLSearchParams(location.search).get('t') || '';
+  var STEP_TITLES = {
+    abrir: 'Abriendo la plataforma',
+    preparar: 'Preparacion',
+    firmar: 'Firma',
+    'firmar-aislado': 'Firma con la red aislada',
+    analizar: 'Analisis en curso',
+    reporte: 'Terminado'
+  };
+  var PRIVATE = { KEY_FILE: 1, KEY_PASSWORD: 1, PRIVATE_KEY: 1 };
+  var lastSeq = -1;
+  var finished = false;
+
+  function $(id) { return document.getElementById(id); }
+  function el(tag, text, cls) {
+    var node = document.createElement(tag);
+    if (text !== undefined && text !== null) { node.textContent = String(text); }
+    if (cls) { node.className = cls; }
+    return node;
+  }
+
+  function post(path) {
+    return fetch(path, { method: 'POST', headers: { 'X-FS-Token': token } });
+  }
+
+  function renderStages(stages) {
+    var list = $('stages');
+    list.textContent = '';
+    stages.forEach(function (stage, index) {
+      var item = el('li', null, stage.status);
+      var mark = stage.status === 'done' ? '✓' : stage.status === 'skipped' ? '–' : String(index + 1);
+      item.appendChild(el('span', mark, 'dot'));
+      item.appendChild(el('span', stage.title));
+      list.appendChild(item);
+    });
+  }
+
+  function renderStep(s) {
+    $('step-title').textContent = STEP_TITLES[s.stage] || 'En curso';
+    var box = $('instructions');
+    if (s.waiting) {
+      box.textContent = s.message;
+      box.className = 'instructions' + (s.stage === 'firmar-aislado' ? ' offline' : '');
+    } else if (s.stage === 'analizar') {
+      box.textContent = 'Analizando lo observado: analisis estatico, correlacion y reglas.';
+      box.className = 'instructions idle';
+    } else if (!s.result) {
+      box.textContent = 'La herramienta esta trabajando; espera a la siguiente instruccion.';
+      box.className = 'instructions idle';
+    } else {
+      box.textContent = 'La auditoria termino.';
+      box.className = 'instructions idle';
+    }
+    var showCred = s.credential && (s.stage === 'firmar' || s.stage === 'firmar-aislado');
+    $('cred-box').hidden = !showCred;
+    if (showCred) {
+      $('cred-key').textContent = s.credential.key_path;
+      $('cred-cer').textContent = s.credential.cert_path;
+      $('cred-pwd').textContent = s.credential.password;
+    }
+    $('next').disabled = !s.waiting;
+    $('next').hidden = !!s.result;
+    var notes = $('notes');
+    notes.textContent = '';
+    s.notes.forEach(function (n) { notes.appendChild(el('li', n)); });
+  }
+
+  function renderCounters(c) {
+    $('c-key').textContent = c.key_reads;
+    $('c-crypto').textContent = c.crypto_ops;
+    $('c-sign').textContent = c.signatures;
+    $('c-egress').textContent = c.egress;
+    $('c-third').textContent = c.third_party;
+    $('c-private').textContent = c.egress_private;
+  }
+
+  function renderEvents(events) {
+    var body = $('events');
+    var feed = $('feed');
+    var atBottom = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 20;
+    events.forEach(function (e) {
+      if (e.seq <= lastSeq) { return; }
+      lastSeq = e.seq;
+      var row = el('tr', null, e.level);
+      row.appendChild(el('td', e.time, 'mono'));
+      row.appendChild(el('td', e.label));
+      var dest = [e.host, e.detail].filter(Boolean).join(' · ');
+      row.appendChild(el('td', dest, 'mono'));
+      var tags = el('td');
+      e.tags.forEach(function (t) { tags.appendChild(el('span', t, PRIVATE[t] ? 'tag p' : 'tag')); });
+      row.appendChild(tags);
+      row.appendChild(el('td', e.sensor + (e.context && e.context !== 'main' ? ' / ' + e.context : '')));
+      body.appendChild(row);
+    });
+    if (atBottom) { feed.scrollTop = feed.scrollHeight; }
+  }
+
+  function renderResult(s) {
+    if (!s.result) { return; }
+    $('result-card').hidden = false;
+    var r = s.result;
+    $('result-summary').textContent = r.error
+      ? 'La sesion termino con un error: ' + r.error
+      : r.findings.length + ' reglas evaluadas, ' + r.actionable + ' con hallazgo. ' +
+        (r.actionable ? '' : 'Que no se observara nada no demuestra que no pueda ocurrir.');
+    if (s.has_report) {
+      var link = $('report-link');
+      link.href = '/report?t=' + encodeURIComponent(token);
+      link.hidden = false;
+    }
+    var list = $('findings');
+    list.textContent = '';
+    r.findings.filter(function (f) {
+      return f.status === 'CONFIRMED' || f.status === 'OBSERVED' || f.status === 'POTENTIAL';
+    }).forEach(function (f) {
+      var item = el('li');
+      item.appendChild(el('span', f.status + ' ', 'st ' + f.status));
+      item.appendChild(el('span', f.rule_id + ' — ' + f.summary));
+      list.appendChild(item);
+    });
+  }
+
+  function refresh() {
+    fetch('/api/state?t=' + encodeURIComponent(token), { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (s) {
+        $('target').textContent = s.target;
+        $('level').textContent = 'nivel ' + s.level;
+        renderStages(s.stages);
+        renderStep(s);
+        renderCounters(s.counters);
+        renderEvents(s.events);
+        renderResult(s);
+        finished = !!s.result;
+      })
+      .catch(function () { /* el servidor pudo cerrarse */ })
+      .then(function () { if (!finished) { setTimeout(refresh, 700); } });
+  }
+
+  $('next').addEventListener('click', function () {
+    $('next').disabled = true;
+    post('/api/next').then(refresh);
+  });
+  $('close').addEventListener('click', function () {
+    post('/api/close').then(function () {
+      $('close').disabled = true;
+      $('close').textContent = 'Panel cerrado; puedes cerrar esta pestana';
+    });
+  });
+  document.addEventListener('click', function (ev) {
+    var id = ev.target && ev.target.getAttribute && ev.target.getAttribute('data-copy');
+    if (!id) { return; }
+    var text = $(id).textContent;
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(function () {
+        ev.target.textContent = 'Copiado';
+        setTimeout(function () { ev.target.textContent = 'Copiar'; }, 1200);
+      });
+    }
+  });
+  refresh();
+})();
+</script>
+</body>
+</html>

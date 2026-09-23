@@ -47,6 +47,7 @@ include = ["firmascope*"]
 "firmascope.report_engine" = ["*.html", "*.css"]
 "firmascope.rule_engine" = ["rules/**/*.yaml"]
 "firmascope.labs" = ["apps/**/*"]
+"firmascope.panel" = ["*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
