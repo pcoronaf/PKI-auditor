@@ -27,17 +27,27 @@ def agent_sha256() -> str:
     return hashlib.sha256(agent_source().encode("utf-8")).hexdigest()
 
 
+#: Marca que el agente anade a la URL de un worker para que el controlador
+#: intercepte su descarga (ver ``workerTarget`` en agent.js).
+WORKER_MARK = "__fs_worker"
+
+
 def build_init_script(session_id: str, channel: str = DEFAULT_CHANNEL,
-                      context: str | None = None, max_queue: int = 5000) -> str:
+                      context: str | None = None, max_queue: int = 5000,
+                      worker_routing: bool = False) -> str:
     """Genera el script que se inyecta antes del JavaScript del sitio.
 
     El agente recibe su propia fuente en ``__FS_AGENT_SRC__`` para poder
-    reinyectarse dentro de los workers que la aplicacion cree.
+    reinyectarse en los workers creados desde blob:. ``worker_routing`` indica
+    que el controlador intercepta la descarga de los workers y antepone el
+    agente, de modo que estos conservan su URL real.
     """
     source = agent_source()
     config: dict[str, Any] = {"session": session_id, "channel": channel, "maxQueue": max_queue}
     if context:
         config["context"] = context
+    if worker_routing:
+        config["workerRouting"] = True
     return (
         "globalThis.__FIRMASCOPE_CONFIG__=" + json.dumps(config) + ";\n"
         "globalThis.__FS_AGENT_SRC__=" + json.dumps(source) + ";\n"

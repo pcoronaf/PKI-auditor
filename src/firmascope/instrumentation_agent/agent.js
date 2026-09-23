@@ -1154,9 +1154,119 @@
     } catch (e) { return null; }
   }
 
+  /*
+   * Como se instrumenta un worker sin cambiar su comportamiento.
+   *
+   * La via antigua — cargar el worker desde un blob: que primero ejecuta el
+   * agente y luego importa el script real — rompia al sitio auditado: dentro
+   * de un blob, self.location deja de ser la URL real y toda ruta relativa
+   * (importScripts('./x.js'), fetch('/api')) falla. Una herramienta de
+   * auditoria que altera lo que audita invalida sus propias conclusiones.
+   *
+   * La via buena: el worker carga desde su URL real, marcada con
+   * __fs_worker=1, y el controlador intercepta esa descarga para anteponer el
+   * agente al script. La marca no llega al servidor: el controlador la quita
+   * antes de pedir el original.
+   */
+  var WORKER_MARK = '__fs_worker=1';
+
+  function markedWorkerUrl(abs) {
+    var hashAt = abs.indexOf('#');
+    var base = hashAt === -1 ? abs : abs.slice(0, hashAt);
+    var hash = hashAt === -1 ? '' : abs.slice(hashAt);
+    if (base.indexOf(WORKER_MARK) !== -1) { return abs; }
+    return base + (base.indexOf('?') === -1 ? '?' : '&') + WORKER_MARK + hash;
+  }
+
+  function workerTarget(url, options) {
+    var abs = absolute(url);
+    // 1. Via preferida: interceptacion de la descarga por el controlador.
+    if (CFG.workerRouting && /^https?:/i.test(abs)) {
+      return { url: markedWorkerUrl(abs), instrumented: true, via: 'route' };
+    }
+    // 2. Un worker blob: o data: ya tiene una base opaca: envolverlo en otro
+    //    blob no cambia como resuelve sus rutas relativas.
+    if (/^(blob|data):/i.test(abs)) {
+      var shim = null;
+      try { shim = workerShim(url, options); } catch (e) { shim = null; }
+      if (shim) { return { url: shim, instrumented: true, via: 'blob' }; }
+    }
+    // 3. Sin via segura, el worker corre sin instrumentar. Observar menos es
+    //    preferible a romper el sitio; el reporte lo marca como no cubierto.
+    return { url: url, instrumented: false, via: 'none' };
+  }
+
+  /*
+   * Puente de procedencia sobre postMessage.
+   *
+   * postMessage entrega una copia clonada: el ArrayBuffer que llega al worker
+   * es otro objeto, sin la marca que llevaba el original. Sin puente, una
+   * aplicacion que firma dentro de un worker pierde toda la procedencia en la
+   * frontera — y con ella la capacidad de ver que el .key sale desde ahi.
+   *
+   * El emisor envia, justo antes del mensaje real, un mensaje de control con
+   * las etiquetas de cada propiedad. El receptor lo intercepta antes que el
+   * codigo del sitio (que nunca lo ve) y marca el mensaje real al llegar.
+   * postMessage conserva el orden dentro de un canal, asi que el emparejado es
+   * exacto. Solo se usa en canales con un agente receptor garantizado: un
+   * worker sin instrumentar recibiria un mensaje que no espera.
+   */
+  var TAINT_KEY = '__firmascope_taint__';
+  var instrumentedWorkers = typeof WeakSet === 'function' ? new WeakSet() : null;
+
+  function taintMeta(message) {
+    var meta = { whole: labelsOf(message), keys: {} };
+    try {
+      if (message && typeof message === 'object' && !Array.isArray(message)
+          && !ArrayBuffer.isView(message) && !(message instanceof ArrayBuffer)) {
+        var keys = O.keys(message);
+        for (var k = 0; k < Math.min(keys.length, 50); k++) {
+          var labels = labelsOf(message[keys[k]]);
+          if (labels.length) { meta.keys[keys[k]] = labels; }
+        }
+      }
+    } catch (e) { /* ignorado */ }
+    return meta.whole.length ? meta : null;
+  }
+
+  function applyTaintMeta(data, meta) {
+    if (!meta) { return; }
+    try {
+      if (data && typeof data === 'object') {
+        for (var key in meta.keys) {
+          if (Object.prototype.hasOwnProperty.call(meta.keys, key) && data[key] !== undefined) {
+            taint(data[key], meta.keys[key]);
+          }
+        }
+      }
+      // El contenedor recibe ademas la union: si el sitio reenvia el mensaje
+      // entero, la procedencia viaja con el.
+      taint(data, meta.whole);
+    } catch (e) { /* ignorado */ }
+  }
+
+  /* Receptor: devuelve true si el evento era un mensaje de control. */
+  function makeTaintReceiver() {
+    var pending = null;
+    return function (ev) {
+      var data = ev && ev.data;
+      if (data && typeof data === 'object' && data[TAINT_KEY]) {
+        pending = data[TAINT_KEY];
+        return true;
+      }
+      if (pending) { applyTaintMeta(data, pending); pending = null; }
+      return false;
+    };
+  }
+
   function attachWorkerRelay(target) {
     try {
+      var receiveTaint = makeTaintReceiver();
       target.addEventListener('message', function (ev) {
+        if (receiveTaint(ev)) {
+          if (typeof ev.stopImmediatePropagation === 'function') { ev.stopImmediatePropagation(); }
+          return;
+        }
         if (ev && ev.data && ev.data.__firmascope__) {
           if (typeof ev.stopImmediatePropagation === 'function') { ev.stopImmediatePropagation(); }
           var record = ev.data.__firmascope__;
@@ -1172,12 +1282,12 @@
     if (G.Worker) {
       var NativeWorker = G.Worker;
       function FSWorker(url, options) {
-        var shimmed = null;
-        try { shimmed = workerShim(url, options); } catch (e) { shimmed = null; }
-        var instance = new NativeWorker(shimmed || url, options);
+        var target = workerTarget(url, options);
+        var instance = new NativeWorker(target.url, options);
+        if (target.instrumented && instrumentedWorkers) { instrumentedWorkers.add(instance); }
         emit('CONTEXT_CREATED', {
-          kind: 'worker', url: absolute(url), instrumented: !!shimmed,
-          type: (options && options.type) || 'classic'
+          kind: 'worker', url: absolute(url), instrumented: target.instrumented,
+          via: target.via, type: (options && options.type) || 'classic'
         }, []);
         attachWorkerRelay(instance);
         return instance;
@@ -1188,10 +1298,11 @@
     if (G.SharedWorker) {
       var NativeShared = G.SharedWorker;
       function FSSharedWorker(url, options) {
-        var shimmed = null;
-        try { shimmed = workerShim(url, options); } catch (e) { shimmed = null; }
-        var instance = new NativeShared(shimmed || url, options);
-        emit('CONTEXT_CREATED', { kind: 'shared-worker', url: absolute(url), instrumented: !!shimmed }, []);
+        var target = workerTarget(url, options);
+        var instance = new NativeShared(target.url, options);
+        emit('CONTEXT_CREATED', {
+          kind: 'shared-worker', url: absolute(url), instrumented: target.instrumented, via: target.via
+        }, []);
         try { attachWorkerRelay(instance.port); instance.port.start(); } catch (e) { /* ignorado */ }
         return instance;
       }
@@ -1245,6 +1356,49 @@
     labels: function (value) { return labelsOf(value); },
     emit: emit
   };
+
+  guard('message-taint', function () {
+    // Pagina -> worker instrumentado.
+    if (G.Worker && G.Worker.prototype && instrumentedWorkers) {
+      wrap(G.Worker.prototype, 'postMessage', function (original) {
+        return function (message) {
+          if (instrumentedWorkers.has(this)) {
+            var meta = taintMeta(message);
+            if (meta) {
+              var control = {};
+              control[TAINT_KEY] = meta;
+              try { original.call(this, control); } catch (e) { /* ignorado */ }
+            }
+          }
+          return original.apply(this, arguments);
+        };
+      });
+    }
+    // Dentro de un worker dedicado instrumentado: el agente se antepuso al
+    // script, asi que este receptor queda registrado antes que los del sitio.
+    if (IS_WORKER && !IS_SHARED_WORKER && !IS_SERVICE_WORKER) {
+      var receiveTaint = makeTaintReceiver();
+      self.addEventListener('message', function (ev) {
+        if (receiveTaint(ev) && typeof ev.stopImmediatePropagation === 'function') {
+          ev.stopImmediatePropagation();
+        }
+      });
+      // Worker -> pagina: la pagina que lo creo tiene el relevo receptor.
+      var proto = O.getPrototypeOf(self);
+      var holder = (proto && typeof proto.postMessage === 'function') ? proto : self;
+      wrap(holder, 'postMessage', function (original) {
+        return function (message) {
+          var meta = (message && message.__firmascope__) ? null : taintMeta(message);
+          if (meta) {
+            var control = {};
+            control[TAINT_KEY] = meta;
+            try { original.call(this, control); } catch (e) { /* ignorado */ }
+          }
+          return original.apply(this, arguments);
+        };
+      });
+    }
+  });
 
   emit('CONTEXT_CREATED', {
     kind: CONTEXT, url: hrefOf(), agent: '0.1.0', hook_failures: failures.slice(0, 10)
