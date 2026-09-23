@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import socket
 import tempfile
 import threading
 import time
@@ -39,11 +38,6 @@ def available() -> bool:
     return True
 
 
-def free_port(host: str = "127.0.0.1") -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind((host, 0))
-        return int(sock.getsockname()[1])
-
 
 class ProxyUnavailable(RuntimeError):
     """mitmproxy no esta instalado o no pudo arrancar."""
@@ -55,7 +49,9 @@ class ProxyServer:
     def __init__(self, addon: FirmaScopeAddon, host: str = "127.0.0.1", port: int = 0):
         self.addon = addon
         self.host = host
-        self.port = port or free_port(host)
+        #: 0 = que el sistema asigne uno. El puerto real se lee del propio
+        #: mitmproxy cuando esta escuchando (ver _wait_listening).
+        self.port = port
         self.confdir: str | None = None
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -125,15 +121,31 @@ class ProxyServer:
                 pass
 
     def _wait_listening(self) -> None:
+        """Espera a que *este* mitmproxy escuche, y toma su puerto real.
+
+        Comprobar desde fuera que algo acepta conexiones en el puerto no
+        basta: si el puerto se eligio liberandolo antes, otro proceso pudo
+        ocuparlo en el intervalo y la comprobacion daria por listo un proxy
+        que aun no arranco. La unica fuente fiable es el propio mitmproxy.
+        """
         deadline = time.monotonic() + STARTUP_TIMEOUT
         while time.monotonic() < deadline:
-            try:
-                with socket.create_connection((self.host, self.port), timeout=0.5):
-                    return
-            except OSError:
-                time.sleep(0.1)
+            if self._error is not None:
+                break
+            addrs = self._listen_addrs()
+            if addrs:
+                self.port = int(addrs[0][1])
+                return
+            time.sleep(0.05)
         self.stop()
-        raise ProxyUnavailable(f"el proxy no acepta conexiones en {self.url}")
+        raise ProxyUnavailable(f"el proxy no llego a escuchar en {self.host}")
+
+    def _listen_addrs(self) -> list:
+        try:
+            server = self._master.addons.get("proxyserver") if self._master else None
+            return list(server.listen_addrs()) if server is not None else []
+        except Exception:
+            return []
 
     # ------------------------------------------------------------------
     def stop(self) -> None:
