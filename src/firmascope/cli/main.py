@@ -1,6 +1,7 @@
 """Interfaz de linea de ordenes de FirmaScope.
 
     firmascope audit <url> [--level N]     audita un objetivo
+    firmascope login <url> --save F        inicia sesion a mano y guarda la sesion
     firmascope labs serve                  arranca las aplicaciones de laboratorio
     firmascope credentials new             genera credenciales sinteticas
     firmascope rules [--json]              muestra el catalogo de reglas
@@ -52,7 +53,18 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("-o", "--output", default="audits", type=Path,
                        help="directorio de expedientes (por defecto: audits/)")
     audit.add_argument("--headed", action="store_true",
-                       help="mostrar el navegador; necesario para operar el sitio a mano")
+                       help="mostrar el navegador mientras FirmaScope conduce la sesion")
+    audit.add_argument("--manual", action="store_true",
+                       help="conducir la firma a mano: FirmaScope espera y observa "
+                            "(implica --headed)")
+    audit.add_argument("--panel", action="store_true",
+                       help="panel de control en el navegador habitual: etapas, credenciales "
+                            "y eventos en vivo (implica --manual)")
+    audit.add_argument("--session", type=Path, metavar="FICHERO",
+                       help="sesion autenticada guardada con 'firmascope login'")
+    audit.add_argument("--no-sandbox", dest="sandbox", action="store_false", default=None,
+                       help="desactivar el sandbox de Chromium (menos seguro; solo si no "
+                            "arranca con el)")
     audit.add_argument("--dwell", type=float, default=6.0,
                        help="segundos de observacion tras cargar la pagina")
     audit.add_argument("--offline-dwell", type=float, default=6.0,
@@ -69,6 +81,17 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--note", default="", help="etiqueta libre del operador")
     audit.add_argument("--json", action="store_true",
                        help="emitir el resultado como JSON en lugar de texto")
+
+    # -- login ----------------------------------------------------------
+    login = sub.add_parser(
+        "login", help="inicia sesion a mano en la plataforma y guarda la sesion",
+        epilog="El fichero guardado permite entrar en la cuenta mientras la sesion siga "
+               "activa: guardalo fuera de cualquier repositorio y borralo al terminar.")
+    login.add_argument("target", help="URL de inicio de sesion de la plataforma")
+    login.add_argument("--save", type=Path, required=True, metavar="FICHERO",
+                       help="donde guardar la sesion (p. ej. sesion.json)")
+    login.add_argument("--no-sandbox", dest="sandbox", action="store_false", default=None,
+                       help="desactivar el sandbox de Chromium (menos seguro)")
 
     # -- labs -----------------------------------------------------------
     labs = sub.add_parser("labs", help="aplicaciones de laboratorio")
@@ -115,11 +138,22 @@ def cmd_audit(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    if args.session is not None:
+        from ..browser_controller.session import SessionStateError, load_session_state
+        try:
+            load_session_state(args.session)
+        except SessionStateError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
     config = AuditConfig(
         target=args.target,
         level=level,
         output_dir=args.output,
-        headless=not args.headed,
+        headless=not (args.headed or args.manual or args.panel),
+        session_state=args.session,
+        manual=args.manual or args.panel,
+        sandbox=args.sandbox,
         capture_bodies=args.capture_bodies,
         rules_dirs=list(args.rules),
         first_party_domains=list(args.first_party),
@@ -134,11 +168,16 @@ def cmd_audit(args: argparse.Namespace) -> int:
     if not args.json:
         print(f"FirmaScope {__version__} — nivel {int(level)} ({level.name})")
         print(f"Objetivo: {config.target}")
-        if args.headed:
-            print("Navegador visible: opera el sitio a mano; la sesion se analiza al cerrarse.")
+        if args.manual:
+            print("Modo manual: FirmaScope abrira el navegador y te ira indicando cada paso.")
+        elif args.headed:
+            print("Navegador visible: FirmaScope conduce la sesion. Usa --manual para operarla tu.")
         print()
 
-    auditor = Auditor(config)
+    if args.panel:
+        return _audit_with_panel(config, args)
+
+    auditor = Auditor(config, operator=terminal_operator if args.manual else None)
     result = auditor.run(dwell=args.dwell, offline_dwell=args.offline_dwell)
 
     if args.json:
@@ -148,6 +187,118 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
     if result.error:
         return 1
+    return 0
+
+
+def _audit_with_panel(config: AuditConfig, args: argparse.Namespace) -> int:
+    """Auditoria conducida desde el panel de control.
+
+    El panel corre en su propio hilo; la auditoria, con Playwright, en este.
+    Al terminar, el panel queda abierto con el resultado hasta que la persona
+    lo cierre (boton del panel o Enter en la terminal).
+    """
+    import threading
+    import webbrowser
+
+    from ..panel import PanelServer, PanelState, panel_operator
+    from .orchestrator import Auditor
+
+    state = PanelState(config.target, int(config.level), config.offline_test)
+    server = PanelServer(state).start()
+    try:
+        print("Panel de control:")
+        print(f"  {server.url}")
+        print("La direccion lleva un token de acceso: no la compartas.")
+        try:
+            webbrowser.open(server.url)
+        except Exception:
+            print("No se pudo abrir el navegador; abre la direccion a mano.")
+        print()
+
+        auditor = Auditor(config, operator=panel_operator(state),
+                          on_event=state.add_event, on_stage=state.set_stage)
+        result = auditor.run(dwell=args.dwell, offline_dwell=args.offline_dwell)
+        for note in (result.session_note, result.proxy_note, result.credentials_note):
+            state.add_note(note)
+        state.finish(result)
+
+        if args.json:
+            print(json.dumps(_result_json(result), indent=2, ensure_ascii=False, default=str))
+        else:
+            _print_result(result)
+
+        print()
+        print("El panel sigue abierto con el resultado. Cierralo desde el panel o pulsa Enter aqui.")
+        threading.Thread(target=lambda: (sys.stdin.readline(), state.request_close()),
+                         daemon=True).start()
+        while not state.wait_closed(0.5):
+            pass
+    finally:
+        server.stop()
+    return 1 if result.error else 0
+
+
+def terminal_operator(step) -> None:
+    """Operador de terminal: muestra el paso y espera a que la persona pulse Enter.
+
+    La espera ocurre en otro hilo; el principal sigue llamando a
+    ``step.wait``, que drena los sensores. Bloquear el hilo principal en
+    ``input()`` dejaria los eventos del navegador acumulados sin procesar.
+    """
+    import threading
+
+    print()
+    print(step.message)
+    print("Pulsa Enter aqui cuando termines...", flush=True)
+    done = threading.Event()
+
+    def read_enter() -> None:
+        try:
+            sys.stdin.readline()
+        finally:
+            done.set()
+
+    threading.Thread(target=read_enter, daemon=True).start()
+    while not done.is_set():
+        if step.page is None or step.page.is_closed():
+            print("La ventana del navegador se cerro; se continua con lo observado.")
+            return
+        step.wait(0.5)
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    from ..audit_core.config import default_chromium_path
+    from ..browser_controller.launch import BrowserLaunchError
+    from ..browser_controller.session import capture_session
+
+    print(ADVERTENCIA)
+    print()
+    print("Se abrira un navegador. Inicia sesion con tu cuenta de PRUEBA, como siempre.")
+    print("FirmaScope no ve tu contrasena: solo guarda las cookies de la sesion resultante.")
+
+    def wait_for_enter(page) -> None:
+        print("Cuando hayas iniciado sesion, pulsa Enter aqui...", flush=True)
+        sys.stdin.readline()
+
+    try:
+        summary = capture_session(args.target, args.save, wait_for_enter,
+                                  headless=False, browser_path=default_chromium_path(),
+                                  sandbox=args.sandbox)
+    except BrowserLaunchError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"error: no se pudo guardar la sesion: {exc}", file=sys.stderr)
+        return 1
+
+    print()
+    print(f"Sesion guardada en {args.save} (permisos 0600): {summary['cookies']} cookies de "
+          f"{', '.join(summary['cookie_domains']) or 'ningun dominio'}.")
+    if not summary["cookies"]:
+        print("aviso: no se guardo ninguna cookie; comprueba que el inicio de sesion termino.")
+    print("Este fichero permite entrar en la cuenta mientras la sesion siga activa.")
+    print("No lo subas a ningun repositorio. Al terminar, cierra la sesion en la plataforma")
+    print("y borra el fichero.")
     return 0
 
 
@@ -268,6 +419,7 @@ def _result_json(result: Any) -> dict[str, Any]:
         "chain_verified": result.chain_ok,
         "error": result.error,
         "proxy_note": result.proxy_note,
+        "session_note": result.session_note,
         "credentials_note": result.credentials_note,
         "reports": {k: str(v) for k, v in result.reports.items()},
         "findings": [f.to_dict() for f in result.findings],
@@ -278,10 +430,10 @@ def _print_result(result: Any) -> None:
     if result.error:
         print(f"La sesion termino con un error: {result.error}")
         print("Se analizo lo capturado hasta ese momento.\n")
-    for note in (result.proxy_note, result.credentials_note):
-        if note:
-            print(note)
-    if result.proxy_note or result.credentials_note:
+    notes = [n for n in (result.session_note, result.proxy_note, result.credentials_note) if n]
+    for note in notes:
+        print(note)
+    if notes:
         print()
 
     for finding in result.findings:
@@ -319,6 +471,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     handlers = {
         "audit": cmd_audit,
+        "login": cmd_login,
         "labs": cmd_labs,
         "credentials": cmd_credentials,
         "rules": cmd_rules,

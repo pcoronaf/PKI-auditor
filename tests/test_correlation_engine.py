@@ -183,11 +183,45 @@ def test_marcas_monotonas_de_cdp_no_producen_latencias_absurdas():
     assert correlate(events).chains[0].latency_ms is None
 
 
+def test_una_salida_anterior_al_acceso_a_la_clave_no_tiene_latencia():
+    events = [egress(1.0, tags=[Tag.DOCUMENT], url="https://sitio.example/doc")] + key_access(10.0)
+    assert correlate(events).chains[0].latency_ms is None
+
+
 def test_sin_acceso_a_la_clave_no_hay_latencia():
     events = [egress(2.0, tags=[Tag.CERTIFICATE], url="https://sitio.example/cert")]
     report = correlate(events)
     assert report.first_key_access is None
     assert report.chains[0].latency_ms is None
+
+
+def test_cargar_un_documento_no_es_acceder_a_la_clave():
+    """Caso real: la plataforma pide subir una factura (PDF y XML) y el
+    certificado minutos antes de leer el .key."""
+    documento = make_event(EventType.FILE_READ, 0.0, tags=[Tag.DOCUMENT], size=50263)
+    certificado = make_event(EventType.FILE_READ, 600.0, tags=[Tag.CERTIFICATE], size=1107)
+    clave = key_access(616.0)
+    report = correlate([documento, certificado] + clave)
+    assert report.first_key_access is clave[0]
+
+
+def test_una_lectura_sin_clasificar_se_toma_como_acceso_a_la_clave():
+    lectura = make_event(EventType.FILE_READ, 0.0, tags=[Tag.UNCLASSIFIED], size=1337)
+    assert correlate([lectura]).first_key_access is lectura
+
+
+def test_cada_envio_narra_solo_las_lecturas_que_lo_precedieron():
+    """El mismo documento se sube dos veces: la primera cadena no puede
+    incluir la segunda lectura, que ocurrio despues."""
+    events = [
+        make_event(EventType.FILE_READ, 0.0, tags=[Tag.DOCUMENT], size=50263),
+        egress(10.0, tags=[Tag.DOCUMENT], url="https://sitio.example/api/addInvoice"),
+        make_event(EventType.FILE_READ, 500.0, tags=[Tag.DOCUMENT], size=50263),
+        egress(510.0, tags=[Tag.DOCUMENT], url="https://sitio.example/api/addInvoice"),
+    ]
+    primera, segunda = sorted(correlate(events).chains, key=lambda c: c.egress.timestamp)
+    assert [s.kind for s in primera.steps] == ["source", "egress"]
+    assert [s.kind for s in segunda.steps] == ["source", "source", "egress"]
 
 
 # ----------------------------------------------------------------------

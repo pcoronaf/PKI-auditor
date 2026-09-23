@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>demo-login — iniciar sesion</title>
+<link rel="stylesheet" href="/shared/lab.css">
+</head>
+<body>
+<main>
+  <h1>Iniciar sesion</h1>
+  <p class="sub">Aplicacion de laboratorio de FirmaScope &mdash; acceso a la plataforma de firma</p>
+  <p class="warn">Cuenta de laboratorio: usuario <code>operador</code>, contrase&ntilde;a
+  <code>laboratorio-firmascope</code>. No tiene nada que ver con la e.firma.</p>
+  <form class="card" method="post" action="/api/login">
+    <label for="username">Usuario</label>
+    <input type="text" id="username" name="username" autocomplete="username">
+    <label for="account-password">Contrase&ntilde;a de la cuenta</label>
+    <input type="password" id="account-password" name="password" autocomplete="current-password">
+    <button id="login" type="submit">Entrar</button>
+  </form>
+</main>
+</body>
+</html>

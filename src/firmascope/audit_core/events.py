@@ -124,6 +124,27 @@ class Tag(str, enum.Enum):
 #: Subconjunto de etiquetas que nunca deberian abandonar el navegador.
 PRIVATE_TAGS = frozenset({Tag.KEY_FILE, Tag.KEY_PASSWORD, Tag.PRIVATE_KEY})
 
+#: Etiquetas que no dicen nada sobre la naturaleza del dato.
+_NEUTRAL_TAGS = frozenset({Tag.UNCLASSIFIED.value, Tag.DERIVED.value})
+
+
+def is_key_access(event: "Event") -> bool:
+    """True si el evento es un acceso a material privado.
+
+    Leer un fichero o importar una clave solo cuenta si lo leido es privado.
+    En una plataforma real el operador carga antes documentos (un PDF, un XML)
+    y el certificado, que es publico: tomarlos como "acceso a la clave"
+    adelantaria el instante de referencia de las reglas temporales y haria
+    sospechoso el trafico anterior a la firma. Una lectura sin clasificar se
+    sigue contando, por prudencia.
+    """
+    if event.type not in KEY_ACCESS_EVENTS:
+        return False
+    if event.type in (EventType.FILE_READ, EventType.CRYPTO_IMPORT):
+        known = set(event.tags) - _NEUTRAL_TAGS
+        return not known or bool(known & {t.value for t in PRIVATE_TAGS})
+    return True
+
 
 def now() -> float:
     """Marca temporal de pared, en segundos con fraccion (epoch)."""

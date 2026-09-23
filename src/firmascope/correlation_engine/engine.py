@@ -39,6 +39,7 @@ from ..audit_core.events import (
     Event,
     EventType,
     Tag,
+    is_key_access,
 )
 from ..network_analyzer import domains
 
@@ -326,7 +327,10 @@ class CorrelationEngine:
 
         # 2. Origenes: los eventos que introdujeron este material en la pagina.
         for source in sources:
-            if not (_labels_of(source) & relevant):
+            # Un origen posterior a la salida no pudo alimentarla: en una
+            # plataforma real el mismo documento se carga varias veces, y cada
+            # envio solo puede narrar las lecturas que lo precedieron.
+            if not (_labels_of(source) & relevant) or _after(source, egress_ts):
                 continue
             steps.append(Step(event=source, kind="source",
                               description=_describe_source(source),
@@ -538,9 +542,7 @@ def _first_key_access(events: Sequence[Event]) -> Event | None:
     for event in events:
         if _usable(event.timestamp) is None:
             continue
-        if event.type in (EventType.FILE_READ, EventType.PASSWORD_READ,
-                          EventType.CRYPTO_IMPORT, EventType.CRYPTO_DECRYPT,
-                          EventType.CRYPTO_UNWRAP):
+        if is_key_access(event):
             return event
     return None
 
@@ -550,7 +552,9 @@ def _latency_ms(anchor: Event | None, egress: Event) -> int | None:
         return None
     start = _usable(anchor.timestamp)
     end = _usable(egress.timestamp)
-    if start is None or end is None:
+    if start is None or end is None or end < start:
+        # Una salida anterior al acceso a la clave no tiene latencia respecto
+        # de el (p. ej. subir un documento antes de firmar).
         return None
     return int((end - start) * 1000)
 

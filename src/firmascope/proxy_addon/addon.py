@@ -35,7 +35,7 @@ from ..audit_core.config import AuditConfig
 from ..audit_core.events import Event, EventType, Tag
 from ..audit_core.secrets import SecretVault
 from ..evidence_store.store import EvidenceStore, RequestRecord
-from ..network_analyzer import domains
+from ..network_analyzer import canaries, domains
 
 #: Cuerpo maximo examinado en busca de canarios. Mas alla se trunca: una
 #: subida de varios megas no debe bloquear el bucle del proxy.
@@ -121,8 +121,7 @@ class FirmaScopeAddon:
 
     def _enqueue(self, *, kind: str, timestamp: float, method: str, url: str,
                  headers: dict[str, str], content_type: str, body: bytes) -> None:
-        scanned = body[:MAX_SCAN_BYTES]
-        matches = self.vault.scan(scanned) if (self.vault is not None and scanned) else []
+        _, matches = canaries.classify(self.vault, body[:MAX_SCAN_BYTES], url)
         self._queue.put(ProxyRecord(
             kind=kind,
             timestamp=timestamp,
@@ -132,7 +131,7 @@ class FirmaScopeAddon:
             content_type=content_type,
             body_size=len(body),
             body_digest=hashlib.sha256(body).hexdigest() if body else "",
-            canary_matches=[m.to_dict() for m in matches],
+            canary_matches=matches,
             body=bytes(body) if (self.capture_bodies and body) else None,
         ))
         self.seen += 1

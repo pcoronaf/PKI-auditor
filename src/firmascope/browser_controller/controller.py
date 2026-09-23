@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 
@@ -24,8 +26,14 @@ from ..audit_core.config import AuditConfig
 from ..audit_core.events import Event, EventType
 from ..audit_core.secrets import SecretVault
 from ..evidence_store.store import EvidenceStore, ScriptRecord
-from ..instrumentation_agent.loader import DEFAULT_CHANNEL, build_init_script, record_to_event
+from ..instrumentation_agent.loader import (
+    DEFAULT_CHANNEL,
+    WORKER_MARK,
+    build_init_script,
+    record_to_event,
+)
 from ..network_analyzer import domains
+from .launch import launch_chromium
 from ..network_analyzer.cdp_observer import NetworkObserver
 
 
@@ -33,8 +41,11 @@ class BrowserController:
     """Envoltura de Playwright orientada a auditoria."""
 
     def __init__(self, config: AuditConfig, session_id: str, store: EvidenceStore,
-                 emit: Callable[[Event], None], vault: SecretVault | None = None):
+                 emit: Callable[[Event], None], vault: SecretVault | None = None,
+                 session_state: dict[str, Any] | None = None):
         self.config = config
+        #: Estado autenticado ya cargado y validado por el orquestador.
+        self.session_state = session_state
         self.session_id = session_id
         self.store = store
         self.emit = emit
@@ -75,7 +86,11 @@ class BrowserController:
                 # sitio en desarrollo) pasaria por delante del sensor.
                 "bypass": "<-loopback>",
             }
-        self.browser = self._playwright.chromium.launch(**launch_kwargs)
+        self.browser = launch_chromium(
+            self._playwright, headless=launch_kwargs["headless"],
+            executable_path=launch_kwargs.get("executable_path"),
+            args=launch_kwargs["args"], proxy=launch_kwargs.get("proxy"),
+            sandbox=self.config.sandbox)
         self.browser_version = self.browser.version
 
         context_kwargs: dict[str, Any] = {
@@ -87,11 +102,19 @@ class BrowserController:
             # La CA de auditoria solo se acepta durante la sesion; no se instala
             # en el almacen de certificados del sistema.
             context_kwargs["ignore_https_errors"] = True
+        if self.session_state is not None:
+            # La auditoria arranca dentro de la sesion del operador. Se pasa
+            # el estado ya leido, no la ruta: el fichero no vuelve a abrirse.
+            context_kwargs["storage_state"] = self.session_state
         self.context = self.browser.new_context(**context_kwargs)
         self.context.set_default_timeout(30_000)
 
         self.context.expose_binding(DEFAULT_CHANNEL, self._on_agent_record)
-        self.context.add_init_script(build_init_script(self.session_id, DEFAULT_CHANNEL))
+        self.context.add_init_script(
+            build_init_script(self.session_id, DEFAULT_CHANNEL, worker_routing=True))
+        # Los workers se instrumentan interceptando la descarga de su script
+        # (ver `workerTarget` en agent.js): asi conservan su URL real.
+        self.context.route(re.compile(rf"[?&]{WORKER_MARK}=1"), self._on_worker_script)
 
         self.observer = NetworkObserver(self.session_id, self.store, self.config, self.emit, self.vault)
 
@@ -157,6 +180,34 @@ class BrowserController:
         self._frame_names[frame] = name
         self.emit(Event(EventType.CONTEXT_CREATED, self.session_id, context=name, sensor="browser",
                         data={"kind": "iframe", "url": frame.url}))
+
+    def _on_worker_script(self, route) -> None:
+        """Antepone el agente al script de un worker marcado por el agente.
+
+        El script se pide al servidor sin la marca, de modo que el sitio ve
+        exactamente la peticion que habria hecho. Si algo falla, la peticion
+        sigue su curso sin instrumentar: un worker sin observar es preferible
+        a un worker roto.
+        """
+        original = strip_worker_mark(route.request.url)
+        try:
+            response = route.fetch(url=original)
+            if not response.ok:
+                route.fulfill(response=response)
+                return
+            prelude = build_init_script(self.session_id, DEFAULT_CHANNEL, worker_routing=True)
+            headers = {k: v for k, v in response.headers.items()
+                       if k.lower() not in ("content-length", "content-encoding")}
+            route.fulfill(status=response.status, headers=headers,
+                          body=prelude.encode("utf-8") + b"\n;\n" + response.body())
+        except Exception as exc:
+            self.emit(Event(EventType.AGENT_ERROR, self.session_id, sensor="browser",
+                            data={"kind": "worker-route", "url": original,
+                                  "error": str(exc)[:200]}))
+            try:
+                route.continue_(url=original)
+            except Exception:  # pragma: no cover - la ruta ya se resolvio
+                pass
 
     def _on_worker(self, worker) -> None:
         self._worker_counter += 1
@@ -349,3 +400,10 @@ def _sourcemap_url(body: str) -> str:
         if index >= 0:
             return tail[index + len(marker):].split("\n", 1)[0].strip()[:300]
     return ""
+
+
+def strip_worker_mark(url: str) -> str:
+    """Quita la marca ``__fs_worker=1`` y deja el resto de la URL intacto."""
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != WORKER_MARK]
+    return urlunsplit(parts._replace(query=urlencode(query, doseq=True)))

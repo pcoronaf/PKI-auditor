@@ -105,7 +105,10 @@ class AuditConfig:
     output_dir: Path = Path("audits")
     headless: bool = True
     browser_path: str | None = field(default_factory=default_chromium_path)
-    browser_args: list[str] = field(default_factory=lambda: ["--no-sandbox"])
+    browser_args: list[str] = field(default_factory=list)
+    #: Sandbox de Chromium. None = activado salvo al ejecutar como root
+    #: (ver browser_controller.launch); False solo por decision explicita.
+    sandbox: bool | None = None
     viewport: tuple[int, int] = (1280, 900)
     #: Segundos maximos de sesion interactiva antes de cerrar automaticamente.
     max_duration: float = 900.0
@@ -125,11 +128,21 @@ class AuditConfig:
     correlation_window_ms: int = 5000
     #: Etiqueta libre del operador para identificar la prueba.
     note: str = ""
+    #: Estado de una sesion autenticada (``firmascope login``). Es una
+    #: credencial: nunca se copia al expediente.
+    session_state: Path | None = None
+    #: El operador conduce la firma a mano; FirmaScope espera y observa.
+    manual: bool = False
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         self.level = AuditLevel(self.level)
         self.rules_dirs = [Path(p) for p in self.rules_dirs]
+        if self.session_state is not None:
+            self.session_state = Path(self.session_state)
+        if self.manual:
+            # Conducir la sesion a mano exige ver el navegador.
+            self.headless = False
         if self.level >= AuditLevel.FULL_CORRELATED and self.proxy.port == 0:
             self.proxy.enabled = self.proxy.enabled or False
 
@@ -162,6 +175,7 @@ class AuditConfig:
             "headless": self.headless,
             "browser_path": self.browser_path,
             "browser_args": list(self.browser_args),
+            "sandbox": self.sandbox,
             "capture_bodies": self.capture_bodies,
             "max_body_bytes": self.max_body_bytes,
             "credential_mode": self.credential_mode.value,
@@ -170,6 +184,9 @@ class AuditConfig:
             "correlation_window_ms": self.correlation_window_ms,
             "proxy": self.proxy.to_dict(),
             "note": self.note,
+            # Solo el hecho, nunca la ruta ni el contenido del fichero.
+            "authenticated_session": self.session_state is not None,
+            "manual": self.manual,
             "capabilities": {
                 "network_observation": self.network_observation,
                 "instrumentation": self.instrumentation,

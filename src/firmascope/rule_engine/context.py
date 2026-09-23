@@ -18,10 +18,10 @@ from typing import Any, Iterable, Sequence
 from ..audit_core.config import AuditConfig
 from ..audit_core.events import (
     EGRESS_EVENTS,
-    KEY_ACCESS_EVENTS,
     Event,
     EventType,
     Tag,
+    is_key_access,
 )
 from ..network_analyzer import domains
 from ..static_analyzer.analyzer import StaticReport
@@ -67,7 +67,7 @@ class AuditContext:
         return [e for e in self.events if e.type in EGRESS_EVENTS]
 
     def key_access_events(self) -> list[Event]:
-        return [e for e in self.events if e.type in KEY_ACCESS_EVENTS]
+        return [e for e in self.events if is_key_access(e)]
 
     # -- tiempo ----------------------------------------------------------
     @staticmethod
@@ -235,6 +235,10 @@ class AuditContext:
         for request in self.third_party_requests():
             ts = self.usable_time(request.get("timestamp"))
             if ts is None or ts < anchor.timestamp:
+                continue
+            if self.offline_at(ts):
+                # Con la red aislada la peticion no llego a su destino: el
+                # tercero no recibio nada.
                 continue
             domain = request.get("registrable_domain") or domains.host_of(request.get("url", ""))
             grouped.setdefault(domain, []).append(request)

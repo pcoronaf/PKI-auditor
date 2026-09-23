@@ -18,7 +18,7 @@ from typing import Any, Iterable, Sequence
 
 from ..audit_core.conclusions import Confidence, Severity, Status
 from ..audit_core.events import Event, EventType
-from ..audit_core.secrets import SecretVault, assert_no_secrets, redact
+from ..audit_core.secrets import SecretVault, assert_no_secrets, redact, redact_url
 from . import chain
 
 SCHEMA = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
@@ -242,6 +242,17 @@ class EvidenceStore:
 
     # -- requests -------------------------------------------------------
     def add_request(self, record: RequestRecord) -> RequestRecord:
+        """Persiste una peticion con la URL y las cabeceras redactadas.
+
+        Una peticion GET puede llevar el material en la query string (un
+        pixel de seguimiento con el .key en base64). Las peticiones se
+        redactan y se verifican igual que los eventos antes de tocar el disco.
+        """
+        record.url = redact_url(record.url, self.vault)
+        record.redirect_from = redact_url(record.redirect_from, self.vault)
+        record.headers = redact(record.headers, self.vault)
+        record.stack = [redact(frame, self.vault) for frame in record.stack]
+        assert_no_secrets(json.dumps(record.to_dict(), default=str), self.vault)
         self.db.execute(
             "INSERT OR REPLACE INTO requests (id,session,timestamp,method,url,host,registrable,third_party,"
             "resource_type,initiator,stack_json,headers_json,body_size,body_digest,body_ref,tags_json,status,"

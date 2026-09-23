@@ -17,9 +17,10 @@ from collections import deque
 from typing import Any, Callable
 
 from ..audit_core.config import AuditConfig
-from ..audit_core.events import Event, EventType, Tag
+from ..audit_core.events import Event, EventType, Tag, now
 from ..audit_core.secrets import SecretVault
 from ..evidence_store.store import EvidenceStore, RequestRecord
+from . import canaries as canaries_mod
 from . import domains
 
 #: Tamano maximo de cuerpo que CDP devuelve en linea dentro de requestWillBeSent.
@@ -41,6 +42,8 @@ class NetworkObserver:
         self._sockets: dict[str, str] = {}
         self._sessions: list[Any] = []
         self.request_count = 0
+        #: Diferencia entre el reloj de pared y el reloj monotono de CDP.
+        self._clock_offset: float | None = None
 
     # ------------------------------------------------------------------
     def attach(self, page, context_name: str = "main") -> None:
@@ -94,6 +97,8 @@ class NetworkObserver:
         url = request.get("url", "")
         if url.startswith(("data:", "blob:", "chrome-extension:")):
             return
+        if params.get("wallTime") and params.get("timestamp"):
+            self._clock_offset = float(params["wallTime"]) - float(params["timestamp"])
         initiator = params.get("initiator", {}) or {}
         stack = _flatten_stack(initiator.get("stack"))
         body = _post_data(request)
@@ -145,12 +150,25 @@ class NetworkObserver:
             "stack": stack[:5],
         }
         if canaries:
-            data["canary_matches"] = [m.to_dict() for m in canaries]
+            data["canary_matches"] = canaries
         if record.redirect_from:
             data["redirect_from"] = record.redirect_from
         self.emit(Event(EventType.NETWORK_REQUEST, self.session_id, timestamp=record.timestamp,
                         context=context_name, origin=domains.host_of(url), sensor="cdp",
                         tags=tags, data=data))
+
+    def _wall_time(self, params: dict[str, Any]) -> float:
+        """Marca de pared para eventos que CDP solo fecha con su reloj monotono.
+
+        Solo ``requestWillBeSent`` trae ``wallTime``; de el se obtiene la
+        diferencia entre ambos relojes y se aplica al resto. Sin ella, la hora
+        de proceso es mejor aproximacion que una marca monotona, que no se
+        puede comparar con las de los demas sensores.
+        """
+        monotonic = params.get("timestamp")
+        if monotonic and self._clock_offset is not None:
+            return float(monotonic) + self._clock_offset
+        return now()
 
     def _on_responseReceived(self, params: dict[str, Any], context_name: str) -> None:
         record = self._requests.get(params.get("requestId", ""))
@@ -158,7 +176,7 @@ class NetworkObserver:
         if record is not None:
             self.store.update_request(record.id, status=int(response.get("status", 0)))
         self.emit(Event(EventType.NETWORK_RESPONSE, self.session_id,
-                        timestamp=params.get("timestamp") or 0.0, context=context_name,
+                        timestamp=self._wall_time(params), context=context_name,
                         sensor="cdp", data={
                             "url": response.get("url", ""),
                             "status": response.get("status"),
@@ -176,7 +194,7 @@ class NetworkObserver:
     def _on_loadingFailed(self, params: dict[str, Any], context_name: str) -> None:
         record = self._requests.get(params.get("requestId", ""))
         self.emit(Event(EventType.NETWORK_FAILED, self.session_id,
-                        timestamp=params.get("timestamp") or 0.0, context=context_name, sensor="cdp",
+                        timestamp=self._wall_time(params), context=context_name, sensor="cdp",
                         data={
                             "url": record.url if record else "",
                             "error": params.get("errorText", ""),
@@ -204,7 +222,7 @@ class NetworkObserver:
             "body_digest": hashlib.sha256(raw).hexdigest() if raw else "",
         }
         if canaries:
-            data["canary_matches"] = [m.to_dict() for m in canaries]
+            data["canary_matches"] = canaries
         self.emit(Event(EventType.WEBSOCKET_SEND, self.session_id, context=context_name, sensor="cdp",
                         tags=tags, data=data))
 
@@ -230,15 +248,8 @@ class NetworkObserver:
 
     # ------------------------------------------------------------------
     def _classify_body(self, body: bytes | None, url: str) -> tuple[list[str], list]:
-        """Etiqueta un cuerpo saliente buscando representaciones de canarios."""
-        if not body:
-            return [], []
-        matches = self.vault.scan(body) if self.vault else []
-        tags = sorted({m.label for m in matches})
-        if not tags and body:
-            tags = [Tag.UNCLASSIFIED.value]
-        return tags, matches
-
+        """Etiqueta una salida buscando canarios en el cuerpo y en la URL."""
+        return canaries_mod.classify(self.vault, body, url)
 
 # ----------------------------------------------------------------------
 def _post_data(request: dict[str, Any]) -> bytes | None:
@@ -269,11 +280,20 @@ def _decode_frame(payload: str, response: dict[str, Any]) -> bytes:
     return payload.encode("utf-8", "replace")
 
 
+#: Cabeceras que transportan credenciales del operador, no evidencia.
+SENSITIVE_HEADERS = frozenset({"authorization", "cookie", "set-cookie", "proxy-authorization"})
+
+
 def _clip_headers(headers: dict[str, Any]) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in list(headers.items())[:40]:
-        text = str(value)
-        out[str(key)[:64]] = text[:256]
+        name = str(key)[:64]
+        if name.lower() in SENSITIVE_HEADERS:
+            # La sesion autenticada del operador no es evidencia de custodia
+            # de la clave, y si es una credencial.
+            out[name] = "<omitida>"
+            continue
+        out[name] = str(value)[:256]
     return out
 
 

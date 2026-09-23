@@ -1,11 +1,12 @@
 """Servidor de las aplicaciones de laboratorio.
 
-Sirve las cinco demos y los endpoints que necesitan para comportarse como
+Sirve las demos y los endpoints que necesitan para comportarse como
 aplicaciones reales:
 
 ``/api/sign-receipt``   recibe la firma. Lo que todo sitio correcto hace.
 ``/api/server-sign``    recibe el .key y la contrasena, y firma en el servidor.
-``/collect/...``        recolector de las demos que exfiltran.
+``/collect/...``        recolector de las demos que exfiltran (POST, o GET para
+                        el pixel de seguimiento).
 
 Nada de lo recibido se escribe a disco. El servidor cuenta lo que llego y
 descarta el contenido: un laboratorio que persistiera claves privadas seria
@@ -32,7 +33,20 @@ DEMOS = (
     "demo-encrypted-exfiltration",
     "demo-server-sign",
     "demo-static-only",
+    "demo-worker",
+    "demo-side-channels",
+    "demo-minified",
+    "demo-login",
 )
+
+#: Cuenta de laboratorio de demo-login. Da acceso a la plataforma simulada, no
+#: a ninguna e.firma: es el equivalente a la cuenta de prueba del operador.
+LAB_LOGIN_USER = "operador"
+LAB_LOGIN_PASSWORD = "laboratorio-firmascope"
+LAB_SESSION_COOKIE = "fs_lab_session"
+
+#: Rutas de demo-login que exigen una sesion valida.
+PROTECTED_PATHS = ("/demo-login/", "/demo-login/index.html", "/demo-login/app.js")
 
 
 @dataclass
@@ -51,6 +65,7 @@ class LabHandler(SimpleHTTPRequestHandler):
     """Maneja los ficheros estaticos y los endpoints del laboratorio."""
 
     received: Received
+    sessions: set
     quiet = True
 
     def log_message(self, fmt: str, *args) -> None:  # pragma: no cover - ruido
@@ -71,9 +86,33 @@ class LabHandler(SimpleHTTPRequestHandler):
             return str(target / "index.html")
         return str(target)
 
+    def _has_session(self) -> bool:
+        from http.cookies import SimpleCookie
+
+        jar = SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie", ""))
+        except Exception:
+            return False
+        morsel = jar.get(LAB_SESSION_COOKIE)
+        return morsel is not None and morsel.value in self.sessions
+
     def do_GET(self) -> None:
+        if self.path.split("?")[0] in PROTECTED_PATHS and not self._has_session():
+            self.send_response(302)
+            self.send_header("Location", "/demo-login/login.html")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path.split("?")[0] in ("/", "/index.html"):
             self._send(200, "text/html; charset=utf-8", _index_page().encode("utf-8"))
+            return
+        if self.path.split("?")[0].startswith("/collect"):
+            # Pixel de seguimiento: el material viaja en la query string. Se
+            # cuenta su tamano y se descarta, como el resto del recolector.
+            path, _, query = self.path.partition("?")
+            self.received.note_collection(path, len(query))
+            self._send(200, "image/gif", _PIXEL)
             return
         if self.path.split("?")[0] == "/__lab/received":
             self._send(200, "application/json",
@@ -85,6 +124,27 @@ class LabHandler(SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
+
+        if path == "/api/login":
+            import secrets as _secrets
+            from urllib.parse import parse_qs
+
+            form = parse_qs(body.decode("utf-8", "replace"))
+            user = (form.get("username") or [""])[0]
+            password = (form.get("password") or [""])[0]
+            if user != LAB_LOGIN_USER or password != LAB_LOGIN_PASSWORD:
+                self._send(401, "text/html; charset=utf-8",
+                           b"<p>Usuario o contrasena incorrectos.</p>")
+                return
+            token = _secrets.token_urlsafe(24)
+            self.sessions.add(token)
+            self.send_response(303)
+            self.send_header("Location", "/demo-login/")
+            self.send_header("Set-Cookie",
+                             f"{LAB_SESSION_COOKIE}={token}; HttpOnly; Path=/; SameSite=Lax")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
 
         if path == "/api/sign-receipt":
             self.received.receipts += 1
@@ -149,6 +209,9 @@ def _server_sign(body: bytes, content_type: str) -> dict[str, Any]:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+#: GIF transparente de 1x1, la respuesta habitual de un pixel de seguimiento.
+_PIXEL = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+
 _BOUNDARY = re.compile(r'boundary="?([^";]+)"?', re.I)
 _DISPOSITION = re.compile(rb'name="([^"]*)"')
 
@@ -203,8 +266,10 @@ class LabServer:
 
     def __init__(self, host: str = "127.0.0.1", port: int = 0, quiet: bool = True):
         self.received = Received()
+        #: Tokens de sesion validos de demo-login. Viven solo en memoria.
+        self.sessions: set[str] = set()
         handler = type("BoundLabHandler", (LabHandler,),
-                       {"received": self.received, "quiet": quiet})
+                       {"received": self.received, "sessions": self.sessions, "quiet": quiet})
         self.httpd = HTTPServer((host, port), handler)
         self.thread: threading.Thread | None = None
 

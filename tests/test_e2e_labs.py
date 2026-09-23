@@ -310,3 +310,274 @@ def test_nivel4_tres_sensores_sostienen_la_misma_fuga(lab, tmp_path):
     assert {"agent", "proxy", "canary"} <= set(chains[0].corroboration)
     # Y la CA efimera no sobrevive a la sesion.
     assert auditor.proxy is None
+
+
+# ----------------------------------------------------------------------
+# Laboratorios que ponen a prueba los supuestos de la herramienta
+# ----------------------------------------------------------------------
+
+def test_worker_la_instrumentacion_no_rompe_el_worker_del_sitio(lab, tmp_path):
+    """El agente se inyectaba envolviendo el worker en un blob:, y dentro de
+    un blob toda ruta relativa falla. El worker del sitio dejaba de funcionar:
+    la herramienta alteraba lo que auditaba."""
+    antes = len(lab.received.collected)
+    result = run_audit(lab, "demo-worker", tmp_path)
+
+    assert result.error == ""
+    recibidos = [c["path"] for c in lab.received.collected[antes:]]
+    assert "/collect/worker" in recibidos, "el worker del sitio no llego a ejecutarse"
+
+
+def test_worker_la_procedencia_cruza_postmessage(lab, tmp_path):
+    """Nivel 3, sin proxy: la fuga ocurre dentro del worker y solo puede
+    verla la instrumentacion, que necesita que la procedencia cruce
+    postMessage."""
+    from firmascope.evidence_store.store import EvidenceStore
+
+    result = run_audit(lab, "demo-worker", tmp_path)
+    assert status_of(result, "FS-KEY-001") is Status.OBSERVED
+
+    store = EvidenceStore(result.output_dir, result.session_id)
+    try:
+        del_worker = [e for e in store.events()
+                      if e.context == "worker" and e.type is EventType.NETWORK_REQUEST]
+    finally:
+        store.close()
+    assert any(Tag.KEY_FILE.value in e.tags for e in del_worker)
+
+
+def test_canales_laterales_y_tercero(lab, tmp_path):
+    """La contrasena en un beacon y el .key en la query de un pixel, hacia un
+    dominio de tercero. El pixel es una peticion GET sin cuerpo: solo se ve
+    buscando el canario en la URL."""
+    result = run_audit(lab, "demo-side-channels", tmp_path)
+
+    assert status_of(result, "FS-PWD-001") is Status.OBSERVED
+    assert status_of(result, "FS-KEY-001") is Status.OBSERVED
+    assert status_of(result, "FS-NET-001") is Status.OBSERVED
+
+
+def test_codigo_minificado(lab, tmp_path):
+    """Sin nombres de variable. La ejecucion no depende de ellos, y el analisis
+    estatico tampoco debe: la ruta se encuentra por las APIs y por los ids
+    del HTML, que la minificacion no toca."""
+    result = run_audit(lab, "demo-minified", tmp_path)
+
+    assert status_of(result, "FS-KEY-001") is Status.OBSERVED
+    assert status_of(result, "FS-PWD-001") is Status.OBSERVED
+    finding = next(f for f in result.findings if f.rule_id == "FS-CODE-001")
+    assert finding.status is Status.POTENTIAL
+
+
+def test_canales_laterales_el_expediente_no_guarda_la_clave_de_la_url(lab, tmp_path):
+    """La clave viajo en la query de un pixel. El reporte debe decir a donde
+    salio sin volver a escribirla, y el expediente tampoco puede contenerla."""
+    import base64
+    from urllib.parse import quote
+
+    config = AuditConfig(target=lab.url_for("demo-side-channels"),
+                         level=AuditLevel.LOCAL_SIGNING_TEST, output_dir=tmp_path, headless=True)
+    auditor = Auditor(config)
+    result = auditor.run(dwell=4.0, offline_dwell=3.0)
+
+    assert result.error == "", result.error
+    assert result.reports, "el reporte no se escribio"
+    b64 = base64.b64encode(auditor.credential.key_der).decode()
+    formas = [b64.encode(), quote(b64, safe="").encode()]
+    for path in result.output_dir.rglob("*"):
+        if not path.is_file() or path.parent.name == "credentials":
+            continue
+        blob = path.read_bytes()
+        for forma in formas:
+            assert forma[:48] not in blob, f"la clave aparece en {path.name}"
+
+
+# ----------------------------------------------------------------------
+# Plataformas con inicio de sesion (demo-login)
+# ----------------------------------------------------------------------
+
+def _iniciar_sesion(page):
+    """Lo que haria la persona en la ventana de `firmascope login`."""
+    from firmascope.labs.server import LAB_LOGIN_PASSWORD, LAB_LOGIN_USER
+
+    page.fill("#username", LAB_LOGIN_USER)
+    page.fill("#account-password", LAB_LOGIN_PASSWORD)
+    page.click("#login")
+    page.wait_for_url("**/demo-login/")
+
+
+@pytest.fixture
+def sesion(lab, tmp_path):
+    from firmascope.browser_controller.session import capture_session
+
+    path = tmp_path / "sesion.json"
+    capture_session(lab.url_for("demo-login"), path, _iniciar_sesion, headless=True,
+                    browser_path=default_chromium_path())
+    return path
+
+
+def _audit_login(lab, tmp_path, **kwargs):
+    operator = kwargs.pop("operator", None)
+    config = AuditConfig(target=lab.url_for("demo-login"), level=AuditLevel.LOCAL_SIGNING_TEST,
+                         output_dir=tmp_path / "audits", **kwargs)
+    config.headless = True     # el modo manual lo desactiva; aqui no hay pantalla
+    auditor = Auditor(config, operator=operator)
+    return auditor, auditor.run(dwell=4.0, offline_dwell=3.0)
+
+
+def test_login_sin_sesion_la_herramienta_lo_dice(lab, tmp_path):
+    """Sin sesion se llega al login: no hay formulario de firma, y la
+    auditoria no finge haberlo auditado."""
+    _, result = _audit_login(lab, tmp_path)
+    assert "No se reconocio el formulario" in result.credentials_note
+    assert status_of(result, "FS-KEY-001") is Status.INCONCLUSIVE
+
+
+def test_login_con_sesion_llega_al_formulario(lab, tmp_path, sesion):
+    _, result = _audit_login(lab, tmp_path, session_state=sesion)
+    assert result.error == ""
+    assert "Sesion autenticada" in result.session_note
+    assert result.credentials_note == "Credenciales sinteticas entregadas al sitio."
+    assert actionable_ids(result) == set()
+    assert status_of(result, "FS-KEY-001") is Status.NOT_OBSERVED
+
+
+def test_login_la_cookie_de_sesion_no_llega_al_expediente(lab, tmp_path, sesion):
+    import json
+
+    tokens = [c["value"] for c in json.loads(sesion.read_text())["cookies"]]
+    assert tokens and all(len(t) >= 12 for t in tokens)
+    _, result = _audit_login(lab, tmp_path, session_state=sesion)
+    for path in result.output_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        blob = path.read_bytes()
+        for token in tokens:
+            assert token.encode() not in blob, f"la cookie de sesion aparece en {path.name}"
+
+
+def test_modo_manual_con_prueba_de_aislamiento(lab, tmp_path, sesion):
+    """El operador firma y luego repite la firma con la red aislada. Es la
+    unica forma de llegar a CONFIRMED: la firma local queda demostrada."""
+    from firmascope.browser_controller import forms
+
+    pasos = []
+
+    def operador(step):
+        pasos.append(step.step)
+        if step.step == "preparar":
+            assert step.credential is None, "las credenciales no se dan antes de firmar"
+        elif step.step == "firmar":
+            assert step.credential is not None
+            assert str(step.credential.key_path) in step.message
+            forms.submit(step.page, forms.provide(step.page, step.credential))
+        else:
+            forms.submit(step.page, forms.detect(step.page))
+        step.wait(3.0)
+
+    _, result = _audit_login(lab, tmp_path, session_state=sesion, manual=True, operator=operador)
+    assert pasos == ["preparar", "firmar", "firmar-aislado"]
+    assert status_of(result, "FS-LOCAL-001") is Status.CONFIRMED
+    assert status_of(result, "FS-KEY-001") is Status.NOT_OBSERVED
+
+
+
+# ----------------------------------------------------------------------
+# Panel de control
+# ----------------------------------------------------------------------
+
+def _post_next(server) -> None:
+    """Lo que hace el boton "Siguiente etapa" del panel."""
+    import urllib.request
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener.open(urllib.request.Request(
+        f"http://127.0.0.1:{server.port}/api/next", method="POST",
+        headers={"X-FS-Token": server.token}), timeout=5).read()
+
+
+def test_panel_la_pagina_funciona_en_un_navegador(tmp_path):
+    """La pagina real: muestra la etapa y las credenciales, el boton avanza, y
+    lo que viene del sitio auditado se pinta como texto, nunca como HTML."""
+    from types import SimpleNamespace
+
+    from playwright.sync_api import sync_playwright
+
+    from firmascope.browser_controller.launch import launch_chromium
+    from firmascope.panel import PanelServer, PanelState
+
+    from conftest import egress
+
+    state = PanelState("https://sitio.example/firmar", 3, offline_test=True)
+    hostil = egress(1.0, tags=[Tag.KEY_FILE], url="https://evil.example/c", third_party=True)
+    hostil.data["method"] = "<img src=x onerror=window.__xss=1>"
+    hostil.seq = 1
+    state.add_event(hostil)
+    state.ask("firmar", "Firma en el formulario usando SOLO estas credenciales sinteticas:",
+              SimpleNamespace(key_path="/tmp/lab.key", cert_path="/tmp/lab.cer",
+                              password="contrasena-sintetica"))
+
+    with PanelServer(state) as server, sync_playwright() as p:
+        browser = launch_chromium(p, headless=True, executable_path=default_chromium_path())
+        page = browser.new_page()
+        errores = []
+        page.on("pageerror", lambda e: errores.append(str(e)))
+        page.goto(server.url)
+        page.wait_for_function("document.getElementById('cred-pwd').textContent.length > 0")
+
+        assert page.text_content("#cred-pwd") == "contrasena-sintetica"
+        assert page.is_visible("text=Usa solo estas credenciales") or page.is_visible("#cred-box")
+        assert "private" in page.get_attribute("#events tr", "class")
+        assert page.evaluate("window.__xss") is None, "el panel ejecuto HTML del sitio auditado"
+        assert "<img" in page.text_content("#events"), "el contenido hostil debe verse como texto"
+
+        page.click("#next")
+        page.wait_for_function("document.getElementById('next').disabled")
+        assert state.advanced
+        assert errores == [], errores
+        browser.close()
+
+
+def test_panel_conduce_una_auditoria_completa(lab, tmp_path, sesion):
+    """demo-login de principio a fin desde el panel: la persona actua en el
+    navegador de auditoria y pulsa "Siguiente etapa" en el panel."""
+    import threading
+
+    from firmascope.browser_controller import forms
+    from firmascope.panel import PanelServer, PanelState, panel_operator
+
+    state = PanelState(lab.url_for("demo-login"), 3, offline_test=True)
+    with PanelServer(state) as server:
+        del_panel = panel_operator(state)
+
+        def persona(step):
+            if step.step == "firmar":
+                forms.submit(step.page, forms.provide(step.page, step.credential))
+            elif step.step == "firmar-aislado":
+                forms.submit(step.page, forms.detect(step.page))
+            threading.Timer(2.0, _post_next, args=(server,)).start()
+            del_panel(step)
+
+        config = AuditConfig(target=lab.url_for("demo-login"), level=AuditLevel.LOCAL_SIGNING_TEST,
+                             output_dir=tmp_path / "audits", session_state=sesion, manual=True)
+        config.headless = True
+        auditor = Auditor(config, operator=persona, on_event=state.add_event,
+                          on_stage=state.set_stage)
+        result = auditor.run(dwell=2.0, offline_dwell=2.0)
+        state.finish(result)
+
+        snap = state.snapshot()
+        assert [s["status"] for s in snap["stages"]] == ["done"] * 6
+        assert snap["counters"]["key_reads"] >= 1
+        assert snap["counters"]["signatures"] >= 2, "firma normal y firma con la red aislada"
+        assert snap["counters"]["egress_private"] == 0
+        assert snap["result"]["error"] == ""
+        assert snap["has_report"]
+        assert status_of(result, "FS-LOCAL-001") is Status.CONFIRMED
+
+        # Lo que el panel expone sale de eventos ya redactados: ni la cookie
+        # de sesion aparece en su estado.
+        import json
+        tokens = [c["value"] for c in json.loads(sesion.read_text())["cookies"]]
+        texto = json.dumps(snap)
+        assert all(t not in texto for t in tokens)

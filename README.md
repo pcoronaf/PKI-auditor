@@ -144,10 +144,11 @@ Otras desviaciones deliberadas respecto de la especificación:
 | CLI (`firmascope audit ...`) | implementado, con pruebas |
 | Aplicaciones de laboratorio | implementadas, con pruebas e2e |
 | Addon de mitmproxy (nivel 4, CA efímera) | implementado, con pruebas e2e |
+| Panel de control local (`--panel`) | implementado, con pruebas e2e |
 | Pruebas TC-001..TC-006 | **verdes** |
 
-La suíte son 179 pruebas unitarias más 14 extremo a extremo que lanzan un
-Chromium real contra las cinco aplicaciones de laboratorio (dos de ellas en
+La suíte son 250 pruebas unitarias más 25 extremo a extremo que lanzan un
+Chromium real contra las nueve aplicaciones de laboratorio (dos de ellas en
 nivel 4, con el proxy interpuesto):
 
 ```bash
@@ -166,6 +167,10 @@ Lo que la herramienta concluye hoy sobre cada aplicación de laboratorio:
 | `demo-encrypted-exfiltration` | `FS-NET-002` OBSERVED, `FS-KEY-002` POTENTIAL |
 | `demo-server-sign` | `FS-KEY-001` y `FS-PWD-001` OBSERVED |
 | `demo-static-only` | sólo `FS-CODE-001` POTENTIAL |
+| `demo-worker` | `FS-KEY-001` OBSERVED — la fuga ocurre dentro de un Web Worker |
+| `demo-side-channels` | `FS-KEY-001`, `FS-PWD-001` y `FS-NET-001` OBSERVED — beacon y píxel hacia un tercero |
+| `demo-minified` | `FS-KEY-001` y `FS-PWD-001` OBSERVED, `FS-CODE-001` POTENTIAL — código empaquetado con terser |
+| `demo-login` | sin hallazgos con `--session`; con `--manual`, `FS-LOCAL-001` CONFIRMADO |
 
 Las dos filas que más dicen son la primera y la última. Que `demo-safe` no
 produzca ningún hallazgo es lo que hace utilizable al resto del catálogo: una
@@ -173,6 +178,25 @@ herramienta que marca a las aplicaciones correctas no sirve para auditar
 ninguna. Y que `demo-static-only` produzca `POTENTIAL` sin producir
 `OBSERVED` es la separación entre los niveles 1 y 2: nada salió — eso es
 cierto — pero el código cargado puede hacerlo.
+
+Los tres últimos laboratorios existen para poner a prueba los supuestos de la
+herramienta, y cada uno encontró algo:
+
+- `demo-worker` mostró que la instrumentación **rompía** los workers del sitio:
+  los cargaba desde un `blob:`, donde toda ruta relativa falla. Ahora el
+  worker conserva su URL real y el agente se antepone a su script al
+  descargarlo. La procedencia además cruza `postMessage`, así que la fuga
+  desde el worker se ve en nivel 3 sin necesidad del proxy.
+- `demo-side-channels` mostró que un `.key` enviado en la query de un píxel
+  era invisible para CDP y el proxy, que solo miraban el cuerpo — y, peor,
+  que esa URL **se guardaba sin redactar en el expediente**. Ahora se buscan
+  canarios también en la URL (en su forma decodificada) y las peticiones se
+  redactan igual que los eventos.
+- `demo-minified` mostró que el análisis estático dependía de los nombres de
+  variable. Sin ellos no encontraba nada; y al corregirlo aparecieron dos
+  falsos positivos sobre la entrega de la firma (retornos que no distinguían
+  el punto de llamada, y nombres reutilizados en bloques). Ahora la ruta se
+  encuentra por las APIs y por los ids del HTML, que la minificación no toca.
 
 `demo-encrypted-exfiltration` merece una nota. El seguimiento de procedencia
 no atraviesa un bucle que construye una cadena carácter a carácter, así que
@@ -200,6 +224,89 @@ Si no reconoce el formulario lo dice y sugiere `--headed`, para que el
 operador conduzca la sesión a mano: rellenar el formulario equivocado sería
 peor que no rellenar ninguno.
 
+
+### Plataformas con inicio de sesión
+
+Si la plataforma exige iniciar sesión antes de llegar al formulario de firma,
+el inicio de sesión se separa de la auditoría. **FirmaScope nunca ve la
+contraseña de la plataforma**: la escribe el operador en un navegador visible.
+
+Instalación en **Windows (PowerShell)** — la vía más sencilla para una
+auditoría con navegador visible:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1      # si PowerShell lo bloquea: Set-ExecutionPolicy -Scope Process Bypass
+pip install -e ".[proxy]"
+playwright install chromium
+```
+
+En **WSL** hacen falta además las bibliotecas del sistema de Chromium
+(`sudo .venv/bin/playwright install-deps chromium`) y WSLg (Windows 11) para
+ver el navegador. Clona el repositorio dentro del sistema de ficheros de Linux
+(`~/`), no en `/mnt/c/...`: ahí los permisos `0600` no se aplican, y si la
+carpeta está en OneDrive el expediente se sincronizaría a la nube.
+
+```bash
+# 1. Inicia sesión a mano con la cuenta de PRUEBA; se guardan solo las cookies.
+firmascope login https://plataforma.example/login --save ~/firmascope/sesion.json
+
+# 2. Audita ya dentro de la sesión.
+firmascope audit https://plataforma.example/firmar --session ~/firmascope/sesion.json
+
+# 2b. Si el formulario de firma no se reconoce solo, condúcelo tú:
+firmascope audit https://plataforma.example/firmar --session ~/firmascope/sesion.json --manual
+```
+
+En modo `--manual` FirmaScope abre el navegador, te da las credenciales
+sintéticas que debes usar y espera a que firmes. En nivel 3 o superior te
+pide después **repetir la firma con la red aislada**: si la aplicación firma
+sin red, `FS-LOCAL-001` queda CONFIRMADO, que es la evidencia más fuerte que la
+herramienta puede dar a favor de un sitio.
+
+### El panel de control (`--panel`)
+
+Si antes de firmar hay que hacer un recorrido (iniciar sesión, cargar un
+documento, rellenar datos), la opción `--panel` guía la auditoría desde una
+página local que se abre en tu navegador habitual, al lado del navegador de
+auditoría:
+
+```powershell
+firmascope audit https://plataforma.example/firmar --session sesion.json --panel
+```
+
+El panel muestra las etapas (abrir → preparación → firma → firma con la red
+aislada → análisis → reporte), qué hacer en cada una, las credenciales
+sintéticas con botones de copiar (rutas absolutas, listas para el selector de
+archivos) y los eventos que los sensores van observando, con las salidas de
+material privado resaltadas. El botón **Siguiente etapa** sustituye al Enter
+del modo `--manual`; al terminar, el panel enlaza el reporte completo.
+
+- **Preparación**: haz en el navegador de auditoría los pasos previos. Si hay
+  que cargar un documento, usa uno de **prueba, sin información real**. Aún no
+  uses ninguna credencial.
+- **Firma**: firma con las credenciales sintéticas que muestra el panel, nunca
+  con tu e.firma real.
+- **Firma con la red aislada** (nivel 3+): repite la firma; el panel avisa de
+  que la red está cortada.
+
+El panel escucha solo en `127.0.0.1`, en un puerto aleatorio, y exige un token
+aleatorio que va en la URL que imprime la terminal: **no compartas esa URL**.
+Rechaza cabeceras `Host` ajenas (DNS rebinding), las órdenes exigen el token en
+una cabecera propia que una web ajena no puede añadir, la página lleva una CSP
+estricta con nonce y todo lo que proviene del sitio auditado se pinta como
+texto. Lo que muestra sale de los eventos ya redactados por el expediente.
+
+El fichero de sesión es una credencial: permite entrar en la cuenta mientras la
+sesión siga activa. Se escribe con permisos `0600`, sus valores se protegen en
+el vault para que no lleguen nunca al expediente y el manifiesto solo registra
+que la sesión estaba autenticada. Guárdalo fuera de cualquier repositorio y, al
+terminar, cierra la sesión en la plataforma y borra el fichero.
+
+El navegador se lanza **con** el sandbox de Chromium. Playwright lo desactiva
+por defecto, así que FirmaScope lo pide de forma explícita; solo se desactiva
+al ejecutar como root (lo típico de un contenedor) o si el operador lo decide
+con `--no-sandbox`.
 
 ### El proxy (nivel 4)
 
