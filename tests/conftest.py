@@ -97,5 +97,7 @@ def lab_sources() -> dict[str, bytes]:
     """Codigo de las cinco aplicaciones de laboratorio, por nombre de demo."""
     out: dict[str, bytes] = {}
     for demo in sorted(p for p in LABS_DIR.iterdir() if p.name.startswith("demo-")):
-        out[demo.name] = (demo / "app.js").read_bytes()
+        # demo-minified no tiene app.js: se sirve como un unico bundle.
+        entry = demo / "app.js" if (demo / "app.js").exists() else demo / "bundle.min.js"
+        out[demo.name] = entry.read_bytes()
     return out

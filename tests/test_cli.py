@@ -200,7 +200,7 @@ def test_el_laboratorio_sirve_las_cinco_aplicaciones(lab):
         status, body = _get(lab.url_for(demo))
         assert status == 200
         assert demo.encode() in body
-        assert b"/shared/lab.js" in body
+        assert b"<script src=" in body
 
 
 def test_el_laboratorio_sirve_la_biblioteca_compartida(lab):
@@ -259,3 +259,12 @@ def test_el_servidor_firma_con_la_clave_que_le_suben(lab):
     assert "signature" in result, result
     assert base64.b64decode(result["signature"])
     assert lab.received.server_signs == 1
+
+
+def test_el_pixel_cuenta_la_query_pero_no_la_guarda(lab):
+    """El material viaja en la URL; el recolector solo registra su tamano."""
+    status, body = _get(f"{lab.base_url}/collect/pixel.gif?k=AAAABBBBCCCC")
+    assert status == 200
+    assert body.startswith(b"GIF89a")
+    assert lab.received.collected == [{"path": "/collect/pixel.gif", "bytes": 14}]
+    assert "AAAABBBBCCCC" not in json.dumps(lab.received.__dict__)

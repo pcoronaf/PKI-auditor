@@ -1,11 +1,12 @@
 """Servidor de las aplicaciones de laboratorio.
 
-Sirve las cinco demos y los endpoints que necesitan para comportarse como
+Sirve las demos y los endpoints que necesitan para comportarse como
 aplicaciones reales:
 
 ``/api/sign-receipt``   recibe la firma. Lo que todo sitio correcto hace.
 ``/api/server-sign``    recibe el .key y la contrasena, y firma en el servidor.
-``/collect/...``        recolector de las demos que exfiltran.
+``/collect/...``        recolector de las demos que exfiltran (POST, o GET para
+                        el pixel de seguimiento).
 
 Nada de lo recibido se escribe a disco. El servidor cuenta lo que llego y
 descarta el contenido: un laboratorio que persistiera claves privadas seria
@@ -32,6 +33,9 @@ DEMOS = (
     "demo-encrypted-exfiltration",
     "demo-server-sign",
     "demo-static-only",
+    "demo-worker",
+    "demo-side-channels",
+    "demo-minified",
 )
 
 
@@ -74,6 +78,13 @@ class LabHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path.split("?")[0] in ("/", "/index.html"):
             self._send(200, "text/html; charset=utf-8", _index_page().encode("utf-8"))
+            return
+        if self.path.split("?")[0].startswith("/collect"):
+            # Pixel de seguimiento: el material viaja en la query string. Se
+            # cuenta su tamano y se descarta, como el resto del recolector.
+            path, _, query = self.path.partition("?")
+            self.received.note_collection(path, len(query))
+            self._send(200, "image/gif", _PIXEL)
             return
         if self.path.split("?")[0] == "/__lab/received":
             self._send(200, "application/json",
@@ -148,6 +159,9 @@ def _server_sign(body: bytes, content_type: str) -> dict[str, Any]:
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
+
+#: GIF transparente de 1x1, la respuesta habitual de un pixel de seguimiento.
+_PIXEL = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
 
 _BOUNDARY = re.compile(r'boundary="?([^";]+)"?', re.I)
 _DISPOSITION = re.compile(rb'name="([^"]*)"')
