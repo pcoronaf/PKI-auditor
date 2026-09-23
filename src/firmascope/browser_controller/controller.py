@@ -33,6 +33,7 @@ from ..instrumentation_agent.loader import (
     record_to_event,
 )
 from ..network_analyzer import domains
+from .launch import launch_chromium
 from ..network_analyzer.cdp_observer import NetworkObserver
 
 
@@ -85,7 +86,11 @@ class BrowserController:
                 # sitio en desarrollo) pasaria por delante del sensor.
                 "bypass": "<-loopback>",
             }
-        self.browser = self._playwright.chromium.launch(**launch_kwargs)
+        self.browser = launch_chromium(
+            self._playwright, headless=launch_kwargs["headless"],
+            executable_path=launch_kwargs.get("executable_path"),
+            args=launch_kwargs["args"], proxy=launch_kwargs.get("proxy"),
+            sandbox=self.config.sandbox)
         self.browser_version = self.browser.version
 
         context_kwargs: dict[str, Any] = {

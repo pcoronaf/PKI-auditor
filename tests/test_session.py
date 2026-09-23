@@ -175,12 +175,72 @@ def test_headed_ya_no_promete_lo_que_no_hace():
     assert "opera el sitio a mano" not in ayuda
 
 
-def test_sin_sandbox_solo_como_root(monkeypatch):
-    """En el equipo del operador el sandbox de Chromium se mantiene: es lo que
-    aisla al sistema del sitio auditado."""
-    import firmascope.audit_core.config as config_mod
+class _FakeChromium:
+    def __init__(self, error: str | None = None):
+        self.kwargs = None
+        self.error = error
 
-    monkeypatch.setattr(config_mod.os, "geteuid", lambda: 1000, raising=False)
-    assert "--no-sandbox" not in config_mod.default_browser_args()
-    monkeypatch.setattr(config_mod.os, "geteuid", lambda: 0, raising=False)
-    assert config_mod.default_browser_args() == ["--no-sandbox"]
+    def launch(self, **kwargs):
+        self.kwargs = kwargs
+        if self.error:
+            raise RuntimeError(self.error)
+        return "navegador"
+
+
+class _FakePlaywright:
+    def __init__(self, error: str | None = None):
+        self.chromium = _FakeChromium(error)
+
+
+def test_el_sandbox_se_pide_explicitamente_a_playwright(monkeypatch):
+    """Playwright anade --no-sandbox salvo que se le pida chromium_sandbox=True.
+    No basta con no anadirlo nosotros: hay que pedir el sandbox."""
+    import firmascope.browser_controller.launch as launch_mod
+
+    monkeypatch.setattr(launch_mod.os, "geteuid", lambda: 1000, raising=False)
+    fake = _FakePlaywright()
+    launch_mod.launch_chromium(fake, headless=True, args=["--no-sandbox", "--lang=es"])
+    assert fake.chromium.kwargs["chromium_sandbox"] is True
+    assert "--no-sandbox" not in fake.chromium.kwargs["args"]
+    assert "--lang=es" in fake.chromium.kwargs["args"]
+
+
+def test_como_root_el_sandbox_se_desactiva(monkeypatch):
+    import firmascope.browser_controller.launch as launch_mod
+
+    monkeypatch.setattr(launch_mod.os, "geteuid", lambda: 0, raising=False)
+    fake = _FakePlaywright()
+    launch_mod.launch_chromium(fake, headless=True)
+    assert fake.chromium.kwargs["chromium_sandbox"] is False
+
+
+def test_el_operador_puede_desactivarlo_explicitamente(monkeypatch):
+    import firmascope.browser_controller.launch as launch_mod
+
+    monkeypatch.setattr(launch_mod.os, "geteuid", lambda: 1000, raising=False)
+    fake = _FakePlaywright()
+    launch_mod.launch_chromium(fake, headless=True, sandbox=False)
+    assert fake.chromium.kwargs["chromium_sandbox"] is False
+
+
+@pytest.mark.parametrize("error,pista", [
+    ("error while loading shared libraries: libnspr4.so: cannot open shared object file",
+     "install-deps chromium"),
+    ("Executable doesn't exist at /home/x/.cache/ms-playwright/chromium-1/chrome",
+     "playwright install chromium"),
+    ("No usable sandbox! Update your kernel", "--no-sandbox"),
+])
+def test_los_errores_de_arranque_dicen_que_hacer(error, pista):
+    from firmascope.browser_controller.launch import BrowserLaunchError, launch_chromium
+
+    with pytest.raises(BrowserLaunchError) as exc:
+        launch_chromium(_FakePlaywright(error), headless=False)
+    assert pista in str(exc.value)
+
+
+def test_la_cli_expone_no_sandbox_como_decision_explicita():
+    from firmascope.cli.main import build_parser
+    args = build_parser().parse_args(["audit", "https://x.example"])
+    assert args.sandbox is None
+    args = build_parser().parse_args(["audit", "https://x.example", "--no-sandbox"])
+    assert args.sandbox is False

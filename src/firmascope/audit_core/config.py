@@ -79,20 +79,6 @@ def default_chromium_path() -> str | None:
     return str(sorted(candidates, key=revision)[-1])
 
 
-def default_browser_args() -> list[str]:
-    """Argumentos de Chromium segun el entorno.
-
-    ``--no-sandbox`` solo cuando es imprescindible: Chromium se niega a
-    arrancar con sandbox si corre como root, que es lo habitual en un
-    contenedor. En el equipo del operador el sandbox se mantiene, porque es
-    justo lo que aisla al sistema del sitio que se esta auditando.
-    """
-    geteuid = getattr(os, "geteuid", None)
-    if geteuid is not None and geteuid() == 0:
-        return ["--no-sandbox"]
-    return []
-
-
 @dataclass
 class ProxyConfig:
     """Configuracion del proxy de interceptacion (nivel 4)."""
@@ -119,7 +105,10 @@ class AuditConfig:
     output_dir: Path = Path("audits")
     headless: bool = True
     browser_path: str | None = field(default_factory=default_chromium_path)
-    browser_args: list[str] = field(default_factory=lambda: default_browser_args())
+    browser_args: list[str] = field(default_factory=list)
+    #: Sandbox de Chromium. None = activado salvo al ejecutar como root
+    #: (ver browser_controller.launch); False solo por decision explicita.
+    sandbox: bool | None = None
     viewport: tuple[int, int] = (1280, 900)
     #: Segundos maximos de sesion interactiva antes de cerrar automaticamente.
     max_duration: float = 900.0
@@ -186,6 +175,7 @@ class AuditConfig:
             "headless": self.headless,
             "browser_path": self.browser_path,
             "browser_args": list(self.browser_args),
+            "sandbox": self.sandbox,
             "capture_bodies": self.capture_bodies,
             "max_body_bytes": self.max_body_bytes,
             "credential_mode": self.credential_mode.value,

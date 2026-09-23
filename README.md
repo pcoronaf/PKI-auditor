@@ -146,7 +146,7 @@ Otras desviaciones deliberadas respecto de la especificación:
 | Addon de mitmproxy (nivel 4, CA efímera) | implementado, con pruebas e2e |
 | Pruebas TC-001..TC-006 | **verdes** |
 
-La suíte son 218 pruebas unitarias más 23 extremo a extremo que lanzan un
+La suíte son 224 pruebas unitarias más 23 extremo a extremo que lanzan un
 Chromium real contra las nueve aplicaciones de laboratorio (dos de ellas en
 nivel 4, con el proxy interpuesto):
 
@@ -230,10 +230,23 @@ Si la plataforma exige iniciar sesión antes de llegar al formulario de firma,
 el inicio de sesión se separa de la auditoría. **FirmaScope nunca ve la
 contraseña de la plataforma**: la escribe el operador en un navegador visible.
 
-```bash
-pip install -e ".[proxy]"
-playwright install chromium          # si no hay un Chromium en el equipo
+Instalación en **Windows (PowerShell)** — la vía más sencilla para una
+auditoría con navegador visible:
 
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1      # si PowerShell lo bloquea: Set-ExecutionPolicy -Scope Process Bypass
+pip install -e ".[proxy]"
+playwright install chromium
+```
+
+En **WSL** hacen falta además las bibliotecas del sistema de Chromium
+(`sudo .venv/bin/playwright install-deps chromium`) y WSLg (Windows 11) para
+ver el navegador. Clona el repositorio dentro del sistema de ficheros de Linux
+(`~/`), no en `/mnt/c/...`: ahí los permisos `0600` no se aplican, y si la
+carpeta está en OneDrive el expediente se sincronizaría a la nube.
+
+```bash
 # 1. Inicia sesión a mano con la cuenta de PRUEBA; se guardan solo las cookies.
 firmascope login https://plataforma.example/login --save ~/firmascope/sesion.json
 
@@ -256,9 +269,10 @@ el vault para que no lleguen nunca al expediente y el manifiesto solo registra
 que la sesión estaba autenticada. Guárdalo fuera de cualquier repositorio y, al
 terminar, cierra la sesión en la plataforma y borra el fichero.
 
-El navegador se lanza **con** el sandbox de Chromium en el equipo del operador;
-solo se desactiva cuando es imprescindible (ejecución como root, típica de un
-contenedor).
+El navegador se lanza **con** el sandbox de Chromium. Playwright lo desactiva
+por defecto, así que FirmaScope lo pide de forma explícita; solo se desactiva
+al ejecutar como root (lo típico de un contenedor) o si el operador lo decide
+con `--no-sandbox`.
 
 ### El proxy (nivel 4)
 

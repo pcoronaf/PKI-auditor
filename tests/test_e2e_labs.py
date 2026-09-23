@@ -412,7 +412,7 @@ def sesion(lab, tmp_path):
 
     path = tmp_path / "sesion.json"
     capture_session(lab.url_for("demo-login"), path, _iniciar_sesion, headless=True,
-                    browser_path=default_chromium_path(), browser_args=["--no-sandbox"])
+                    browser_path=default_chromium_path())
     return path
 
 

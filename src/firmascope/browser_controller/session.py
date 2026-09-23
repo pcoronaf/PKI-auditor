@@ -94,7 +94,8 @@ def capture_session(url: str, path: Path | str,
                     wait_for_operator: Callable[[Any], None],
                     headless: bool = False,
                     browser_path: str | None = None,
-                    browser_args: list[str] | None = None) -> dict[str, Any]:
+                    browser_args: list[str] | None = None,
+                    sandbox: bool | None = None) -> dict[str, Any]:
     """Abre ``url``, espera a que el operador inicie sesion y guarda el estado.
 
     ``wait_for_operator(page)`` vuelve cuando el operador termino. La CLI
@@ -104,11 +105,11 @@ def capture_session(url: str, path: Path | str,
     """
     from playwright.sync_api import sync_playwright
 
+    from .launch import launch_chromium
+
     with sync_playwright() as playwright:
-        launch: dict[str, Any] = {"headless": headless, "args": list(browser_args or [])}
-        if browser_path:
-            launch["executable_path"] = browser_path
-        browser = playwright.chromium.launch(**launch)
+        browser = launch_chromium(playwright, headless=headless, executable_path=browser_path,
+                                  args=browser_args or (), sandbox=sandbox)
         try:
             context = browser.new_context()
             page = context.new_page()

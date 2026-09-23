@@ -59,6 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "(implica --headed)")
     audit.add_argument("--session", type=Path, metavar="FICHERO",
                        help="sesion autenticada guardada con 'firmascope login'")
+    audit.add_argument("--no-sandbox", dest="sandbox", action="store_false", default=None,
+                       help="desactivar el sandbox de Chromium (menos seguro; solo si no "
+                            "arranca con el)")
     audit.add_argument("--dwell", type=float, default=6.0,
                        help="segundos de observacion tras cargar la pagina")
     audit.add_argument("--offline-dwell", type=float, default=6.0,
@@ -84,6 +87,8 @@ def build_parser() -> argparse.ArgumentParser:
     login.add_argument("target", help="URL de inicio de sesion de la plataforma")
     login.add_argument("--save", type=Path, required=True, metavar="FICHERO",
                        help="donde guardar la sesion (p. ej. sesion.json)")
+    login.add_argument("--no-sandbox", dest="sandbox", action="store_false", default=None,
+                       help="desactivar el sandbox de Chromium (menos seguro)")
 
     # -- labs -----------------------------------------------------------
     labs = sub.add_parser("labs", help="aplicaciones de laboratorio")
@@ -145,6 +150,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
         headless=not (args.headed or args.manual),
         session_state=args.session,
         manual=args.manual,
+        sandbox=args.sandbox,
         capture_bodies=args.capture_bodies,
         rules_dirs=list(args.rules),
         first_party_domains=list(args.first_party),
@@ -207,7 +213,8 @@ def terminal_operator(step) -> None:
 
 
 def cmd_login(args: argparse.Namespace) -> int:
-    from ..audit_core.config import default_browser_args, default_chromium_path
+    from ..audit_core.config import default_chromium_path
+    from ..browser_controller.launch import BrowserLaunchError
     from ..browser_controller.session import capture_session
 
     print(ADVERTENCIA)
@@ -222,7 +229,10 @@ def cmd_login(args: argparse.Namespace) -> int:
     try:
         summary = capture_session(args.target, args.save, wait_for_enter,
                                   headless=False, browser_path=default_chromium_path(),
-                                  browser_args=default_browser_args())
+                                  sandbox=args.sandbox)
+    except BrowserLaunchError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"error: no se pudo guardar la sesion: {exc}", file=sys.stderr)
         return 1
