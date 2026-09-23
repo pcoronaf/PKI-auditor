@@ -150,6 +150,9 @@ class SecretVault:
         self._session_key: bytes | None = os.urandom(32)
         self._reps: list[Representation] = []
         self._labels: set[str] = set()
+        #: Valores que solo deben redactarse (p. ej. cookies de la sesion del
+        #: operador). No son canarios: no clasifican el trafico.
+        self._protected: list[Representation] = []
 
     # -- ciclo de vida --------------------------------------------------
     @property
@@ -163,6 +166,7 @@ class SecretVault:
             del rep  # libera la referencia local; el GC hace el resto
         self._reps = []
         self._labels = set()
+        self._protected = []
 
     def __enter__(self) -> "SecretVault":
         return self
@@ -186,6 +190,29 @@ class SecretVault:
         self._reps.extend(representations(label, raw, is_text=is_text, include_markers=include_markers))
         self._labels.add(label)
         return self.fingerprint(raw)
+
+    #: Longitud minima de un valor protegido. Una cookie de dos caracteres
+    #: ("es", "1") aparece en cualquier parte y no es una credencial.
+    MIN_PROTECTED = 12
+
+    def protect(self, value: str, label: str = "SESSION") -> bool:
+        """Registra un valor que nunca debe escribirse a disco.
+
+        A diferencia de :meth:`register`, no crea un canario: la cookie de
+        sesion viaja legitimamente en cada peticion autenticada, y etiquetar
+        esas salidas las haria parecer fugas. Solo participa en la redaccion y
+        en la barrera final (:meth:`labels_in`). Devuelve si se registro.
+        """
+        if not self.alive:
+            raise RuntimeError("SecretVault destruido")
+        if not value or len(value) < self.MIN_PROTECTED:
+            return False
+        raw = value.encode("utf-8")
+        for encoding, needle in (("utf8", raw),
+                                 ("url", urllib.parse.quote(value, safe="").encode()),
+                                 ("base64", _b64(raw))):
+            self._protected.append(Representation(label, encoding, needle))
+        return True
 
     @property
     def labels(self) -> set[str]:
@@ -231,7 +258,17 @@ class SecretVault:
         labels: set[str] = set()
         for variant in decoded_variants(blob):
             labels |= {m.label for m in self.scan(variant)}
+            labels |= {m.label for m in self._scan_protected(variant)}
         return labels
+
+    def _scan_protected(self, blob: bytes | str) -> list[CanaryMatch]:
+        if not self.alive or not self._protected:
+            return []
+        if isinstance(blob, str):
+            blob = blob.encode("utf-8", "replace")
+        return [CanaryMatch(rep.label, rep.encoding, idx, len(rep.needle))
+                for rep in self._protected
+                for idx in [blob.find(rep.needle)] if idx >= 0]
 
 
 # ----------------------------------------------------------------------
@@ -317,6 +354,7 @@ def assert_no_secrets(payload: str, vault: SecretVault | None) -> None:
     hits = []
     for variant in decoded_variants(payload):
         hits.extend(vault.scan(variant))
+        hits.extend(vault._scan_protected(variant))
     if hits:
         raise AssertionError(
             "material sensible a punto de escribirse a disco: "

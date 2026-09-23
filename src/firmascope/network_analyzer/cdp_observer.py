@@ -263,11 +263,20 @@ def _decode_frame(payload: str, response: dict[str, Any]) -> bytes:
     return payload.encode("utf-8", "replace")
 
 
+#: Cabeceras que transportan credenciales del operador, no evidencia.
+SENSITIVE_HEADERS = frozenset({"authorization", "cookie", "set-cookie", "proxy-authorization"})
+
+
 def _clip_headers(headers: dict[str, Any]) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in list(headers.items())[:40]:
-        text = str(value)
-        out[str(key)[:64]] = text[:256]
+        name = str(key)[:64]
+        if name.lower() in SENSITIVE_HEADERS:
+            # La sesion autenticada del operador no es evidencia de custodia
+            # de la clave, y si es una credencial.
+            out[name] = "<omitida>"
+            continue
+        out[name] = str(value)[:256]
     return out
 
 
