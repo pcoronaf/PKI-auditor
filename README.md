@@ -15,8 +15,8 @@ Y distingue rigurosamente entre **“no observé transmisión de la clave”** y
 **“la clave no puede transmitirse”**. Los reportes son conservadores,
 reproducibles y basados en evidencia.
 
-> **Estado: alfa funcional.** Los cuatro niveles se ejecutan de extremo a extremo
-> sobre las aplicaciones de laboratorio. Ver [Estado de implementación](#estado-de-implementación).
+> **Estado: alfa funcional.** Los cuatro niveles, con sus cuatro sensores, se
+> ejecutan de extremo a extremo sobre las aplicaciones de laboratorio. Ver [Estado de implementación](#estado-de-implementación).
 
 Licencia: Apache-2.0.
 
@@ -143,11 +143,12 @@ Otras desviaciones deliberadas respecto de la especificación:
 | Motor de reportes (HTML + JSON) | implementado, con pruebas |
 | CLI (`firmascope audit ...`) | implementado, con pruebas |
 | Aplicaciones de laboratorio | implementadas, con pruebas e2e |
+| Addon de mitmproxy (nivel 4, CA efímera) | implementado, con pruebas e2e |
 | Pruebas TC-001..TC-006 | **verdes** |
-| Addon de mitmproxy | **pendiente** |
 
-La suíte son 157 pruebas unitarias más 12 extremo a extremo que lanzan un
-Chromium real contra las cinco aplicaciones de laboratorio:
+La suíte son 179 pruebas unitarias más 14 extremo a extremo que lanzan un
+Chromium real contra las cinco aplicaciones de laboratorio (dos de ellas en
+nivel 4, con el proxy interpuesto):
 
 ```bash
 pytest -m "not e2e"    # rápido, sin navegador
@@ -198,6 +199,34 @@ buscable queda disponible como canario— y lo entrega al formulario del sitio.
 Si no reconoce el formulario lo dice y sugiere `--headed`, para que el
 operador conduzca la sesión a mano: rellenar el formulario equivocado sería
 peor que no rellenar ninguno.
+
+
+### El proxy (nivel 4)
+
+La instrumentación ve lo que el JavaScript *pide* enviar; CDP, lo que el
+navegador *dice* que envía. El proxy ve lo que efectivamente sale por el
+cable, ya codificado: el multipart con sus fronteras, el cuerpo tras la
+compresión, los frames de WebSocket. Es el único sensor que no depende de la
+cooperación del navegador, y por eso su coincidencia con los otros dos es la
+corroboración más valiosa del expediente. En `demo-server-sign` las tres
+vistas de la subida se funden en **una** cadena, sostenida por agente, CDP,
+proxy y el canario del `.key` encontrado en bruto dentro del multipart.
+
+```bash
+pip install -e ".[proxy]"
+firmascope audit <url> --level 4              # proxy activo si está instalado
+firmascope audit <url> --level 4 --no-proxy   # tres sensores
+```
+
+- **CA efímera.** La autoridad certificadora de mitmproxy se genera en un
+  directorio temporal por sesión y se borra al terminar. Nunca se instala en
+  el almacén del sistema: sólo la acepta el contexto del navegador de
+  auditoría, que muere con la sesión.
+- **Degradación explícita.** Sin mitmproxy instalado, el nivel 4 sigue con
+  tres sensores y el manifiesto lo dice. Nunca se finge un sensor que no
+  corrió.
+- **Sin cuerpos por defecto.** El proxy busca canarios en memoria y registra
+  tamaños y digests. `Authorization` y `Cookie` se omiten del expediente.
 
 ## Documentación
 

@@ -89,6 +89,7 @@ EGRESS_EVENTS = frozenset(
         EventType.NAVIGATION,
         EventType.RESOURCE_URL_SET,
         EventType.PROXY_REQUEST,
+        EventType.PROXY_WEBSOCKET,
     }
 )
 

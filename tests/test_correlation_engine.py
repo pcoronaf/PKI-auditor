@@ -348,3 +348,26 @@ def test_no_se_funden_salidas_de_distinto_tamano():
         egress(2.1, tags=[Tag.KEY_FILE], url="https://evil.example/c", body_size=64),
     ]
     assert len(correlate(events).chains) == 2
+
+
+def test_el_proxy_se_funde_aunque_mida_el_cuerpo_ya_codificado():
+    """El proxy mide el multipart con sus fronteras; el agente, el FormData
+    antes de codificarlo. Es la misma peticion y debe contar una vez."""
+    events = key_access() + [
+        _view("agent", 2.0, tags=[Tag.KEY_FILE]),
+        egress(2.08, url="https://evil.example/c", body_size=3119,
+               canary_matches=[{"label": Tag.KEY_FILE.value, "encoding": "raw"}]),
+    ]
+    events[-1].sensor = "proxy"
+    chains = correlate(events).chains
+    assert len(chains) == 1
+    assert {"agent", "proxy", "canary"} <= set(chains[0].corroboration)
+
+
+def test_vistas_de_sensores_distintos_alejadas_en_el_tiempo_no_se_funden():
+    """Misma URL, sensores distintos, pero 30 s de separacion: dos envios."""
+    events = key_access() + [
+        _view("agent", 2.0, tags=[Tag.KEY_FILE]),
+        _view("proxy", 32.0, tags=[Tag.KEY_FILE]),
+    ]
+    assert len(correlate(events).chains) == 2

@@ -267,3 +267,46 @@ def test_el_canario_encuentra_la_clave_en_el_cuerpo(lab, tmp_path):
     etiquetadas = [c for c in chains if Tag.KEY_FILE.value in c.labels]
     assert con_canario or etiquetadas, (
         "ni el canario ni la instrumentacion atribuyeron la salida")
+
+
+# ----------------------------------------------------------------------
+# Nivel 4: el proxy como cuarto sensor
+# ----------------------------------------------------------------------
+
+def _level4(lab: LabServer, demo: str, tmp_path):
+    from firmascope.audit_core.config import ProxyConfig
+    from firmascope.proxy_addon import available
+
+    if not available():
+        pytest.skip("mitmproxy no esta instalado")
+    config = AuditConfig(
+        target=lab.url_for(demo),
+        level=AuditLevel.FULL_CORRELATED,
+        output_dir=tmp_path,
+        headless=True,
+        proxy=ProxyConfig(enabled=True),
+    )
+    auditor = Auditor(config)
+    return auditor, auditor.run(dwell=4.0, offline_dwell=3.0)
+
+
+def test_nivel4_demo_safe_sigue_sin_hallazgos(lab, tmp_path):
+    """El proxy ve el certificado en el cuerpo, y el certificado comparte el
+    modulo RSA con la clave. Nada de eso puede convertirse en un hallazgo."""
+    _, result = _level4(lab, "demo-safe", tmp_path)
+    assert "activo" in result.proxy_note
+    assert actionable_ids(result) == set()
+    assert result.correlation.exfiltration_chains() == []
+
+
+def test_nivel4_tres_sensores_sostienen_la_misma_fuga(lab, tmp_path):
+    """demo-server-sign: agente, CDP y proxy ven la subida, y el proxy
+    encuentra el .key en el multipart. Una sola cadena, cuatro apoyos."""
+    auditor, result = _level4(lab, "demo-server-sign", tmp_path)
+
+    assert status_of(result, "FS-KEY-001") is Status.OBSERVED
+    chains = result.correlation.exfiltration_chains()
+    assert len(chains) == 1, "la misma subida se conto mas de una vez"
+    assert {"agent", "proxy", "canary"} <= set(chains[0].corroboration)
+    # Y la CA efimera no sobrevive a la sesion.
+    assert auditor.proxy is None

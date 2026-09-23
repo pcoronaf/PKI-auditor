@@ -69,7 +69,11 @@ class BrowserController:
             launch_kwargs["executable_path"] = self.config.browser_path
         if self.config.proxy_enabled:
             launch_kwargs["proxy"] = {
-                "server": f"http://{self.config.proxy.host}:{self.config.proxy.port}"
+                "server": f"http://{self.config.proxy.host}:{self.config.proxy.port}",
+                # Chromium omite el proxy para loopback por defecto. Sin esta
+                # directiva, un objetivo en 127.0.0.1 (el laboratorio, o un
+                # sitio en desarrollo) pasaria por delante del sensor.
+                "bypass": "<-loopback>",
             }
         self.browser = self._playwright.chromium.launch(**launch_kwargs)
         self.browser_version = self.browser.version

@@ -55,6 +55,7 @@ class AuditResult:
     reports: dict[str, Path] = field(default_factory=dict)
     error: str = ""
     credentials_note: str = ""
+    proxy_note: str = ""
 
     def actionable(self) -> list[Any]:
         return [f for f in self.findings
@@ -74,7 +75,9 @@ class Auditor:
         self.store = EvidenceStore(self.output_dir, self.session_id, vault=self.vault)
         self.credential: Any | None = None
         self.credentials_note = ""
-
+        self.proxy: Any | None = None
+        self.proxy_addon: Any | None = None
+        self.proxy_note = ""
 
     # ------------------------------------------------------------------
     def run(self, dwell: float = 6.0, offline_dwell: float = 6.0) -> AuditResult:
@@ -91,8 +94,12 @@ class Auditor:
                     controller.stop()
                 except Exception:  # pragma: no cover - cierre best-effort
                     pass
+            # El proxy se detiene despues del navegador, para no cortar sus
+            # ultimas peticiones, y siempre: su parada destruye la CA efimera.
+            self._stop_proxy()
 
         result.credentials_note = self.credentials_note
+        result.proxy_note = self.proxy_note
         try:
             result = self._analyze(result)
         finally:
@@ -108,6 +115,7 @@ class Auditor:
         """Recorre el objetivo con el navegador instrumentado."""
         from ..browser_controller.controller import BrowserController
 
+        self._start_proxy()
         controller = BrowserController(
             self.config, self.session_id, self.store, self._emit, self.vault)
         controller.start()
@@ -123,11 +131,11 @@ class Auditor:
 
         controller.goto(self.config.target)
         controller.checkpoint("pagina-cargada", "recorrido inicial")
-        controller.wait(1.0)
+        self._wait(controller, 1.0)
         controller.screenshot("cargada")
 
         self._provide_credentials(controller)
-        controller.wait(dwell)
+        self._wait(controller, dwell)
         controller.screenshot("tras-firmar")
 
         if self.config.offline_test:
@@ -182,6 +190,53 @@ class Auditor:
             else "no se encontro un boton de firma que pulsar")
         self.credentials_note = "Credenciales sinteticas entregadas al sitio."
 
+    # ------------------------------------------------------------------
+    # Proxy (nivel 4)
+    # ------------------------------------------------------------------
+    def _start_proxy(self) -> None:
+        """Interpone mitmproxy si el nivel y la configuracion lo piden.
+
+        Si no esta disponible, la sesion sigue con tres sensores y el
+        manifiesto lo refleja: ``proxy.enabled`` queda en falso. Nunca se
+        finge un sensor que no corrio.
+        """
+        if self.config.level < AuditLevel.FULL_CORRELATED or not self.config.proxy.enabled:
+            return
+        from ..proxy_addon import FirmaScopeAddon, ProxyServer, ProxyUnavailable
+
+        self.proxy_addon = FirmaScopeAddon(
+            self.session_id, self.config, vault=self.vault,
+            capture_bodies=self.config.capture_bodies or self.config.proxy.capture_bodies)
+        try:
+            self.proxy = ProxyServer(self.proxy_addon, host=self.config.proxy.host,
+                                     port=self.config.proxy.port).start()
+        except ProxyUnavailable as exc:
+            self.proxy = None
+            self.proxy_addon = None
+            self.config.proxy.enabled = False
+            self.proxy_note = f"Proxy no disponible: {exc}. La sesion continuo sin el."
+            return
+        self.config.proxy.port = self.proxy.port
+        self.proxy_note = f"Proxy de interceptacion activo en {self.proxy.url} (CA efimera)."
+
+    def _drain_proxy(self) -> None:
+        if self.proxy_addon is not None:
+            self.proxy_addon.drain(self.store, self._emit)
+
+    def _stop_proxy(self) -> None:
+        if self.proxy is not None:
+            try:
+                self.proxy.stop()
+            except Exception:  # pragma: no cover - cierre best-effort
+                pass
+        self._drain_proxy()
+        self.proxy = None
+
+    def _wait(self, controller, seconds: float) -> None:
+        """Espera observando: el navegador drena agente y CDP, aqui el proxy."""
+        controller.wait(seconds)
+        self._drain_proxy()
+
     def _offline_test(self, controller, dwell: float) -> None:
         """Nivel 3: aislar la red y ver si la firma se completa igualmente.
 
@@ -190,7 +245,7 @@ class Auditor:
         """
         controller.checkpoint("antes-de-aislar", "fin del recorrido en linea")
         controller.set_offline(True, reason="prueba de firma local (nivel 3)")
-        controller.wait(dwell)
+        self._wait(controller, dwell)
         controller.screenshot("aislada")
         controller.checkpoint("durante-aislamiento", "red del navegador desconectada")
         controller.set_offline(False, reason="fin de la prueba de aislamiento")

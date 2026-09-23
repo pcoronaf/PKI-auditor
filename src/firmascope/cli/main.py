@@ -59,8 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="segundos de observacion con la red aislada (nivel 3+)")
     audit.add_argument("--capture-bodies", action="store_true",
                        help="persistir los cuerpos HTTP (desactivado por defecto)")
-    audit.add_argument("--proxy", action="store_true",
-                       help="interponer mitmproxy (nivel 4)")
+    audit.add_argument("--proxy", action=argparse.BooleanOptionalAction, default=None,
+                       help="interponer mitmproxy. Por defecto: activo en nivel 4 si "
+                            "mitmproxy esta instalado")
     audit.add_argument("--rules", action="append", type=Path, default=[],
                        metavar="DIR", help="directorio adicional con reglas YAML")
     audit.add_argument("--first-party", action="append", default=[], metavar="DOMINIO",
@@ -122,10 +123,13 @@ def cmd_audit(args: argparse.Namespace) -> int:
         capture_bodies=args.capture_bodies,
         rules_dirs=list(args.rules),
         first_party_domains=list(args.first_party),
-        proxy=ProxyConfig(enabled=args.proxy),
+        proxy=ProxyConfig(enabled=_proxy_wanted(args.proxy, level)),
         credential_mode=CredentialMode.SYNTHETIC,
         note=args.note,
     )
+
+    if args.proxy and level < AuditLevel.FULL_CORRELATED:
+        print("aviso: --proxy solo tiene efecto en nivel 4; se ignora.", file=sys.stderr)
 
     if not args.json:
         print(f"FirmaScope {__version__} — nivel {int(level)} ({level.name})")
@@ -145,6 +149,20 @@ def cmd_audit(args: argparse.Namespace) -> int:
     if result.error:
         return 1
     return 0
+
+
+def _proxy_wanted(flag: bool | None, level: AuditLevel) -> bool:
+    """El nivel 4 incluye el proxy salvo que se desactive o no este instalado.
+
+    Pedirlo explicitamente sin tenerlo instalado no es un error fatal: el
+    orquestador lo registra y la sesion sigue con tres sensores.
+    """
+    if level < AuditLevel.FULL_CORRELATED or flag is False:
+        return False
+    if flag is True:
+        return True
+    from ..proxy_addon import available
+    return available()
 
 
 def cmd_labs(args: argparse.Namespace) -> int:
@@ -249,6 +267,8 @@ def _result_json(result: Any) -> dict[str, Any]:
         "output_dir": str(result.output_dir),
         "chain_verified": result.chain_ok,
         "error": result.error,
+        "proxy_note": result.proxy_note,
+        "credentials_note": result.credentials_note,
         "reports": {k: str(v) for k, v in result.reports.items()},
         "findings": [f.to_dict() for f in result.findings],
     }
@@ -258,6 +278,11 @@ def _print_result(result: Any) -> None:
     if result.error:
         print(f"La sesion termino con un error: {result.error}")
         print("Se analizo lo capturado hasta ese momento.\n")
+    for note in (result.proxy_note, result.credentials_note):
+        if note:
+            print(note)
+    if result.proxy_note or result.credentials_note:
+        print()
 
     for finding in result.findings:
         mark = STATUS_MARK.get(finding.status.value, "[ ]")

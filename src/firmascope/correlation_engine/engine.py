@@ -380,40 +380,79 @@ def _merge_sensor_views(egresses: Sequence[Event]) -> list[Event]:
     recuento inflado es justo lo que una herramienta de auditoria no puede
     permitirse.
 
-    El criterio es conservador: solo se funden vistas de **sensores
-    distintos** sobre la misma URL y el mismo tamano de cuerpo. Dos salidas
-    vistas por el mismo sensor son dos salidas, aunque coincidan en todo.
-    """
-    groups: dict[tuple[str, int], list[Event]] = {}
-    order: list[tuple[str, int]] = []
-    for event in egresses:
-        key = (str(event.data.get("url") or ""),
-               int(event.data.get("body_size") or 0))
-        if key not in groups:
-            order.append(key)
-        groups.setdefault(key, []).append(event)
+    Criterio, conservador:
 
-    merged: list[Event] = []
-    for key in order:
-        bucket = groups[key]
-        if not key[0] or len(bucket) == 1:
+    * solo se funden vistas de **sensores distintos** sobre la **misma URL**:
+      dos salidas vistas por el mismo sensor son dos salidas, aunque
+      coincidan en todo;
+    * las vistas deben estar **proximas en el tiempo** (``MATCH_TOLERANCE_S``).
+      El tamano no sirve como criterio principal: el proxy mide el cuerpo tal
+      como viaja por el cable — un multipart con sus fronteras — mientras que
+      el agente estima el tamano del FormData antes de codificarlo, y CDP a
+      veces no llega a verlo;
+    * solo cuando las marcas temporales no son comparables (tiempos monotonos
+      de CDP) se recurre a exigir el mismo tamano de cuerpo.
+    """
+    by_url: dict[str, list[Event]] = {}
+    order: list[str] = []
+    passthrough: list[Event] = []
+    for event in egresses:
+        url = str(event.data.get("url") or "")
+        if not url:
+            passthrough.append(event)
+            continue
+        if url not in by_url:
+            order.append(url)
+        by_url.setdefault(url, []).append(event)
+
+    merged: list[Event] = list(passthrough)
+    for url in order:
+        bucket = by_url[url]
+        if len(bucket) == 1:
             merged.extend(bucket)
             continue
 
-        # Dentro del grupo, una ranura por sensor: la segunda salida del mismo
-        # sensor abre una ranura nueva en lugar de fundirse.
+        # Cada ranura es un envio; admite como mucho una vista por sensor.
         slots: list[dict[str, Event]] = []
-        for event in bucket:
+        for event in sorted(bucket, key=lambda e: (e.timestamp, e.seq)):
             sensor = event.sensor or "?"
-            slot = next((s for s in slots if sensor not in s), None)
-            if slot is None:
+            candidates = [
+                (distance, slot) for slot in slots
+                if sensor not in slot
+                for distance in [_slot_distance(slot, event)]
+                if distance is not None
+            ]
+            if candidates:
+                slot = min(candidates, key=lambda c: c[0])[1]
+            else:
                 slot = {}
                 slots.append(slot)
             slot[sensor] = event
 
         for slot in slots:
             merged.append(_fuse(list(slot.values())))
+
+    merged.sort(key=lambda e: (e.timestamp, e.seq))
     return merged
+
+
+def _slot_distance(slot: dict[str, Event], event: Event) -> float | None:
+    """Distancia de una vista a un envio ya agrupado, o None si no encaja."""
+    ts = _usable(event.timestamp)
+    size = int(event.data.get("body_size") or 0)
+    best: float | None = None
+    for other in slot.values():
+        other_ts = _usable(other.timestamp)
+        if ts is not None and other_ts is not None:
+            gap = abs(ts - other_ts)
+            if gap > MATCH_TOLERANCE_S:
+                return None
+            best = gap if best is None else min(best, gap)
+        elif size and size == int(other.data.get("body_size") or 0):
+            best = MATCH_TOLERANCE_S if best is None else best
+        else:
+            return None
+    return best
 
 
 def _fuse(views: list[Event]) -> Event:
