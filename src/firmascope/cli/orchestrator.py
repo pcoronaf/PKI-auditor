@@ -56,17 +56,39 @@ class AuditResult:
     error: str = ""
     credentials_note: str = ""
     proxy_note: str = ""
+    session_note: str = ""
 
     def actionable(self) -> list[Any]:
         return [f for f in self.findings
                 if f.status.value in ("CONFIRMED", "OBSERVED", "POTENTIAL")]
 
 
+@dataclass
+class OperatorStep:
+    """Lo que recibe el operador en modo manual.
+
+    ``wait(segundos)`` sigue observando mientras el operador trabaja: drena la
+    instrumentacion, CDP y el proxy. El operador debe esperar con ella, no con
+    ``time.sleep``, o los eventos se acumularian sin procesar.
+    """
+
+    step: str
+    message: str
+    page: Any
+    wait: Callable[[float], None]
+    credential: Any | None = None
+
+
+#: Firma del operador: vuelve cuando la persona termino el paso.
+Operator = Callable[[OperatorStep], None]
+
+
 class Auditor:
     """Ejecuta una sesion completa y escribe el expediente."""
 
     def __init__(self, config: AuditConfig, session_id: str | None = None,
-                 on_event: Callable[[Event], None] | None = None):
+                 on_event: Callable[[Event], None] | None = None,
+                 operator: Operator | None = None):
         self.config = config
         self.session_id = session_id or new_session_id()
         self.on_event = on_event
@@ -78,6 +100,10 @@ class Auditor:
         self.proxy: Any | None = None
         self.proxy_addon: Any | None = None
         self.proxy_note = ""
+        self.operator = operator
+        self.session_note = ""
+        if config.manual and operator is None:
+            raise ValueError("el modo manual necesita un operador")
 
     # ------------------------------------------------------------------
     def run(self, dwell: float = 6.0, offline_dwell: float = 6.0) -> AuditResult:
@@ -100,6 +126,7 @@ class Auditor:
 
         result.credentials_note = self.credentials_note
         result.proxy_note = self.proxy_note
+        result.session_note = self.session_note
         try:
             result = self._analyze(result)
         finally:
@@ -115,9 +142,11 @@ class Auditor:
         """Recorre el objetivo con el navegador instrumentado."""
         from ..browser_controller.controller import BrowserController
 
+        session_state = self._load_session()
         self._start_proxy()
         controller = BrowserController(
-            self.config, self.session_id, self.store, self._emit, self.vault)
+            self.config, self.session_id, self.store, self._emit, self.vault,
+            session_state=session_state)
         controller.start()
 
         self.store.open_session(
@@ -146,6 +175,37 @@ class Auditor:
                          sensor="orchestrator", data={}))
         return controller
 
+    def _load_session(self) -> dict[str, Any] | None:
+        """Carga la sesion autenticada y protege sus valores.
+
+        Las cookies y los tokens de la sesion se registran en el vault antes
+        de que el navegador arranque: desde la primera peticion, la redaccion
+        y la barrera final impiden que lleguen al expediente.
+        """
+        if self.config.session_state is None:
+            return None
+        from ..browser_controller.session import (
+            describe_session,
+            load_session_state,
+            session_secrets,
+        )
+
+        state = load_session_state(self.config.session_state)
+        protected = sum(1 for value in session_secrets(state) if self.vault.protect(value))
+        summary = describe_session(state)
+        self.session_note = (
+            f"Sesion autenticada: {summary['cookies']} cookies de "
+            f"{', '.join(summary['cookie_domains']) or 'ningun dominio'}; "
+            f"{protected} valores protegidos de la escritura a disco.")
+        return state
+
+    def _ask_operator(self, controller, step: str, message: str) -> None:
+        self.operator(OperatorStep(
+            step=step, message=message, page=controller.page,
+            wait=lambda seconds: self._wait(controller, seconds),
+            credential=self.credential))
+        self._wait(controller, 0.5)
+
     def _provide_credentials(self, controller) -> None:
         """Entrega credenciales sinteticas al sitio y dispara la firma.
 
@@ -169,6 +229,20 @@ class Auditor:
         credential.write(self.output_dir / "credentials", stem="lab")
         credential.register(self.vault)
         self.credential = credential
+
+        if self.config.manual:
+            # El operador conduce: llega al formulario, entrega las
+            # credenciales sinteticas y firma. FirmaScope observa.
+            controller.checkpoint("operador-inicia", "firma conducida por el operador")
+            self._ask_operator(controller, "firmar", (
+                "Lleva el navegador hasta el formulario de firma y firma usando SOLO estas "
+                "credenciales sinteticas:\n"
+                f"  .key:        {credential.key_path}\n"
+                f"  .cer:        {credential.cert_path}\n"
+                f"  contrasena:  {credential.password}"))
+            controller.checkpoint("operador-termina", "el operador indico que termino")
+            self.credentials_note = "Credenciales sinteticas entregadas por el operador."
+            return
 
         form = forms.detect(controller.page)
         if not form.usable:
@@ -245,7 +319,13 @@ class Auditor:
         """
         controller.checkpoint("antes-de-aislar", "fin del recorrido en linea")
         controller.set_offline(True, reason="prueba de firma local (nivel 3)")
-        self._wait(controller, dwell)
+        if self.config.manual:
+            self._ask_operator(controller, "firmar-aislado", (
+                "La red del navegador esta AISLADA. Repite la firma con las mismas "
+                "credenciales sinteticas. Si la aplicacion firma sin red, la firma es "
+                "local; si falla, depende del servidor. Ambas respuestas sirven."))
+        else:
+            self._wait(controller, dwell)
         controller.screenshot("aislada")
         controller.checkpoint("durante-aislamiento", "red del navegador desconectada")
         controller.set_offline(False, reason="fin de la prueba de aislamiento")

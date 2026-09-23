@@ -40,8 +40,11 @@ class BrowserController:
     """Envoltura de Playwright orientada a auditoria."""
 
     def __init__(self, config: AuditConfig, session_id: str, store: EvidenceStore,
-                 emit: Callable[[Event], None], vault: SecretVault | None = None):
+                 emit: Callable[[Event], None], vault: SecretVault | None = None,
+                 session_state: dict[str, Any] | None = None):
         self.config = config
+        #: Estado autenticado ya cargado y validado por el orquestador.
+        self.session_state = session_state
         self.session_id = session_id
         self.store = store
         self.emit = emit
@@ -94,6 +97,10 @@ class BrowserController:
             # La CA de auditoria solo se acepta durante la sesion; no se instala
             # en el almacen de certificados del sistema.
             context_kwargs["ignore_https_errors"] = True
+        if self.session_state is not None:
+            # La auditoria arranca dentro de la sesion del operador. Se pasa
+            # el estado ya leido, no la ruta: el fichero no vuelve a abrirse.
+            context_kwargs["storage_state"] = self.session_state
         self.context = self.browser.new_context(**context_kwargs)
         self.context.set_default_timeout(30_000)
 

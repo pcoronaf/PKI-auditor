@@ -79,6 +79,20 @@ def default_chromium_path() -> str | None:
     return str(sorted(candidates, key=revision)[-1])
 
 
+def default_browser_args() -> list[str]:
+    """Argumentos de Chromium segun el entorno.
+
+    ``--no-sandbox`` solo cuando es imprescindible: Chromium se niega a
+    arrancar con sandbox si corre como root, que es lo habitual en un
+    contenedor. En el equipo del operador el sandbox se mantiene, porque es
+    justo lo que aisla al sistema del sitio que se esta auditando.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and geteuid() == 0:
+        return ["--no-sandbox"]
+    return []
+
+
 @dataclass
 class ProxyConfig:
     """Configuracion del proxy de interceptacion (nivel 4)."""
@@ -105,7 +119,7 @@ class AuditConfig:
     output_dir: Path = Path("audits")
     headless: bool = True
     browser_path: str | None = field(default_factory=default_chromium_path)
-    browser_args: list[str] = field(default_factory=lambda: ["--no-sandbox"])
+    browser_args: list[str] = field(default_factory=lambda: default_browser_args())
     viewport: tuple[int, int] = (1280, 900)
     #: Segundos maximos de sesion interactiva antes de cerrar automaticamente.
     max_duration: float = 900.0
@@ -125,11 +139,21 @@ class AuditConfig:
     correlation_window_ms: int = 5000
     #: Etiqueta libre del operador para identificar la prueba.
     note: str = ""
+    #: Estado de una sesion autenticada (``firmascope login``). Es una
+    #: credencial: nunca se copia al expediente.
+    session_state: Path | None = None
+    #: El operador conduce la firma a mano; FirmaScope espera y observa.
+    manual: bool = False
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         self.level = AuditLevel(self.level)
         self.rules_dirs = [Path(p) for p in self.rules_dirs]
+        if self.session_state is not None:
+            self.session_state = Path(self.session_state)
+        if self.manual:
+            # Conducir la sesion a mano exige ver el navegador.
+            self.headless = False
         if self.level >= AuditLevel.FULL_CORRELATED and self.proxy.port == 0:
             self.proxy.enabled = self.proxy.enabled or False
 
@@ -170,6 +194,9 @@ class AuditConfig:
             "correlation_window_ms": self.correlation_window_ms,
             "proxy": self.proxy.to_dict(),
             "note": self.note,
+            # Solo el hecho, nunca la ruta ni el contenido del fichero.
+            "authenticated_session": self.session_state is not None,
+            "manual": self.manual,
             "capabilities": {
                 "network_observation": self.network_observation,
                 "instrumentation": self.instrumentation,
