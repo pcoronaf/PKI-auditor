@@ -195,8 +195,10 @@ def _post(url: str, data: bytes, content_type: str = "application/json") -> tupl
         return response.status, response.read()
 
 
-def test_el_laboratorio_sirve_las_cinco_aplicaciones(lab):
+def test_el_laboratorio_sirve_las_aplicaciones(lab):
     for demo in DEMOS:
+        if demo == "demo-login":
+            continue   # exige sesion: ver test_demo_login_sin_sesion_redirige
         status, body = _get(lab.url_for(demo))
         assert status == 200
         assert demo.encode() in body
@@ -268,3 +270,19 @@ def test_el_pixel_cuenta_la_query_pero_no_la_guarda(lab):
     assert body.startswith(b"GIF89a")
     assert lab.received.collected == [{"path": "/collect/pixel.gif", "bytes": 14}]
     assert "AAAABBBBCCCC" not in json.dumps(lab.received.__dict__)
+
+
+def test_demo_login_sin_sesion_redirige_al_login(lab):
+    status, body = _get(lab.url_for("demo-login"))
+    assert status == 200
+    assert b"Iniciar sesion" in body
+    assert b"key-file" not in body
+
+
+def test_demo_login_rechaza_credenciales_incorrectas(lab):
+    import urllib.error
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _post(f"{lab.base_url}/api/login", b"username=operador&password=otra",
+              "application/x-www-form-urlencoded")
+    assert err.value.code == 401
+    assert lab.sessions == set()

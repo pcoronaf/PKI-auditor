@@ -390,3 +390,90 @@ def test_canales_laterales_el_expediente_no_guarda_la_clave_de_la_url(lab, tmp_p
         blob = path.read_bytes()
         for forma in formas:
             assert forma[:48] not in blob, f"la clave aparece en {path.name}"
+
+
+# ----------------------------------------------------------------------
+# Plataformas con inicio de sesion (demo-login)
+# ----------------------------------------------------------------------
+
+def _iniciar_sesion(page):
+    """Lo que haria la persona en la ventana de `firmascope login`."""
+    from firmascope.labs.server import LAB_LOGIN_PASSWORD, LAB_LOGIN_USER
+
+    page.fill("#username", LAB_LOGIN_USER)
+    page.fill("#account-password", LAB_LOGIN_PASSWORD)
+    page.click("#login")
+    page.wait_for_url("**/demo-login/")
+
+
+@pytest.fixture
+def sesion(lab, tmp_path):
+    from firmascope.browser_controller.session import capture_session
+
+    path = tmp_path / "sesion.json"
+    capture_session(lab.url_for("demo-login"), path, _iniciar_sesion, headless=True,
+                    browser_path=default_chromium_path(), browser_args=["--no-sandbox"])
+    return path
+
+
+def _audit_login(lab, tmp_path, **kwargs):
+    operator = kwargs.pop("operator", None)
+    config = AuditConfig(target=lab.url_for("demo-login"), level=AuditLevel.LOCAL_SIGNING_TEST,
+                         output_dir=tmp_path / "audits", **kwargs)
+    config.headless = True     # el modo manual lo desactiva; aqui no hay pantalla
+    auditor = Auditor(config, operator=operator)
+    return auditor, auditor.run(dwell=4.0, offline_dwell=3.0)
+
+
+def test_login_sin_sesion_la_herramienta_lo_dice(lab, tmp_path):
+    """Sin sesion se llega al login: no hay formulario de firma, y la
+    auditoria no finge haberlo auditado."""
+    _, result = _audit_login(lab, tmp_path)
+    assert "No se reconocio el formulario" in result.credentials_note
+    assert status_of(result, "FS-KEY-001") is Status.INCONCLUSIVE
+
+
+def test_login_con_sesion_llega_al_formulario(lab, tmp_path, sesion):
+    _, result = _audit_login(lab, tmp_path, session_state=sesion)
+    assert result.error == ""
+    assert "Sesion autenticada" in result.session_note
+    assert result.credentials_note == "Credenciales sinteticas entregadas al sitio."
+    assert actionable_ids(result) == set()
+    assert status_of(result, "FS-KEY-001") is Status.NOT_OBSERVED
+
+
+def test_login_la_cookie_de_sesion_no_llega_al_expediente(lab, tmp_path, sesion):
+    import json
+
+    tokens = [c["value"] for c in json.loads(sesion.read_text())["cookies"]]
+    assert tokens and all(len(t) >= 12 for t in tokens)
+    _, result = _audit_login(lab, tmp_path, session_state=sesion)
+    for path in result.output_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        blob = path.read_bytes()
+        for token in tokens:
+            assert token.encode() not in blob, f"la cookie de sesion aparece en {path.name}"
+
+
+def test_modo_manual_con_prueba_de_aislamiento(lab, tmp_path, sesion):
+    """El operador firma y luego repite la firma con la red aislada. Es la
+    unica forma de llegar a CONFIRMED: la firma local queda demostrada."""
+    from firmascope.browser_controller import forms
+
+    pasos = []
+
+    def operador(step):
+        pasos.append(step.step)
+        if step.step == "firmar":
+            assert step.credential is not None
+            assert str(step.credential.key_path) in step.message
+            forms.submit(step.page, forms.provide(step.page, step.credential))
+        else:
+            forms.submit(step.page, forms.detect(step.page))
+        step.wait(3.0)
+
+    _, result = _audit_login(lab, tmp_path, session_state=sesion, manual=True, operator=operador)
+    assert pasos == ["firmar", "firmar-aislado"]
+    assert status_of(result, "FS-LOCAL-001") is Status.CONFIRMED
+    assert status_of(result, "FS-KEY-001") is Status.NOT_OBSERVED

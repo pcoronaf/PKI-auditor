@@ -146,8 +146,8 @@ Otras desviaciones deliberadas respecto de la especificación:
 | Addon de mitmproxy (nivel 4, CA efímera) | implementado, con pruebas e2e |
 | Pruebas TC-001..TC-006 | **verdes** |
 
-La suíte son 200 pruebas unitarias más 19 extremo a extremo que lanzan un
-Chromium real contra las ocho aplicaciones de laboratorio (dos de ellas en
+La suíte son 218 pruebas unitarias más 23 extremo a extremo que lanzan un
+Chromium real contra las nueve aplicaciones de laboratorio (dos de ellas en
 nivel 4, con el proxy interpuesto):
 
 ```bash
@@ -169,6 +169,7 @@ Lo que la herramienta concluye hoy sobre cada aplicación de laboratorio:
 | `demo-worker` | `FS-KEY-001` OBSERVED — la fuga ocurre dentro de un Web Worker |
 | `demo-side-channels` | `FS-KEY-001`, `FS-PWD-001` y `FS-NET-001` OBSERVED — beacon y píxel hacia un tercero |
 | `demo-minified` | `FS-KEY-001` y `FS-PWD-001` OBSERVED, `FS-CODE-001` POTENTIAL — código empaquetado con terser |
+| `demo-login` | sin hallazgos con `--session`; con `--manual`, `FS-LOCAL-001` CONFIRMADO |
 
 Las dos filas que más dicen son la primera y la última. Que `demo-safe` no
 produzca ningún hallazgo es lo que hace utilizable al resto del catálogo: una
@@ -222,6 +223,42 @@ Si no reconoce el formulario lo dice y sugiere `--headed`, para que el
 operador conduzca la sesión a mano: rellenar el formulario equivocado sería
 peor que no rellenar ninguno.
 
+
+### Plataformas con inicio de sesión
+
+Si la plataforma exige iniciar sesión antes de llegar al formulario de firma,
+el inicio de sesión se separa de la auditoría. **FirmaScope nunca ve la
+contraseña de la plataforma**: la escribe el operador en un navegador visible.
+
+```bash
+pip install -e ".[proxy]"
+playwright install chromium          # si no hay un Chromium en el equipo
+
+# 1. Inicia sesión a mano con la cuenta de PRUEBA; se guardan solo las cookies.
+firmascope login https://plataforma.example/login --save ~/firmascope/sesion.json
+
+# 2. Audita ya dentro de la sesión.
+firmascope audit https://plataforma.example/firmar --session ~/firmascope/sesion.json
+
+# 2b. Si el formulario de firma no se reconoce solo, condúcelo tú:
+firmascope audit https://plataforma.example/firmar --session ~/firmascope/sesion.json --manual
+```
+
+En modo `--manual` FirmaScope abre el navegador, te da las credenciales
+sintéticas que debes usar y espera a que firmes. En nivel 3 o superior te
+pide después **repetir la firma con la red aislada**: si la aplicación firma
+sin red, `FS-LOCAL-001` queda CONFIRMADO, que es la evidencia más fuerte que la
+herramienta puede dar a favor de un sitio.
+
+El fichero de sesión es una credencial: permite entrar en la cuenta mientras la
+sesión siga activa. Se escribe con permisos `0600`, sus valores se protegen en
+el vault para que no lleguen nunca al expediente y el manifiesto solo registra
+que la sesión estaba autenticada. Guárdalo fuera de cualquier repositorio y, al
+terminar, cierra la sesión en la plataforma y borra el fichero.
+
+El navegador se lanza **con** el sandbox de Chromium en el equipo del operador;
+solo se desactiva cuando es imprescindible (ejecución como root, típica de un
+contenedor).
 
 ### El proxy (nivel 4)
 
