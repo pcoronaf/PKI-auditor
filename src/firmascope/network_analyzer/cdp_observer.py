@@ -20,6 +20,7 @@ from ..audit_core.config import AuditConfig
 from ..audit_core.events import Event, EventType, Tag
 from ..audit_core.secrets import SecretVault
 from ..evidence_store.store import EvidenceStore, RequestRecord
+from . import canaries as canaries_mod
 from . import domains
 
 #: Tamano maximo de cuerpo que CDP devuelve en linea dentro de requestWillBeSent.
@@ -145,7 +146,7 @@ class NetworkObserver:
             "stack": stack[:5],
         }
         if canaries:
-            data["canary_matches"] = [m.to_dict() for m in canaries]
+            data["canary_matches"] = canaries
         if record.redirect_from:
             data["redirect_from"] = record.redirect_from
         self.emit(Event(EventType.NETWORK_REQUEST, self.session_id, timestamp=record.timestamp,
@@ -204,7 +205,7 @@ class NetworkObserver:
             "body_digest": hashlib.sha256(raw).hexdigest() if raw else "",
         }
         if canaries:
-            data["canary_matches"] = [m.to_dict() for m in canaries]
+            data["canary_matches"] = canaries
         self.emit(Event(EventType.WEBSOCKET_SEND, self.session_id, context=context_name, sensor="cdp",
                         tags=tags, data=data))
 
@@ -230,15 +231,8 @@ class NetworkObserver:
 
     # ------------------------------------------------------------------
     def _classify_body(self, body: bytes | None, url: str) -> tuple[list[str], list]:
-        """Etiqueta un cuerpo saliente buscando representaciones de canarios."""
-        if not body:
-            return [], []
-        matches = self.vault.scan(body) if self.vault else []
-        tags = sorted({m.label for m in matches})
-        if not tags and body:
-            tags = [Tag.UNCLASSIFIED.value]
-        return tags, matches
-
+        """Etiqueta una salida buscando canarios en el cuerpo y en la URL."""
+        return canaries_mod.classify(self.vault, body, url)
 
 # ----------------------------------------------------------------------
 def _post_data(request: dict[str, Any]) -> bytes | None:

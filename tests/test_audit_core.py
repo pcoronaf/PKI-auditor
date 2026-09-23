@@ -303,3 +303,78 @@ def test_verify_localiza_el_primer_registro_roto():
     records[2] = ({"n": 99}, records[2][1], records[2][2])
     ok, roto = chain.verify(records)
     assert not ok and roto == 2
+
+
+# ----------------------------------------------------------------------
+# Material sensible dentro de una URL
+# ----------------------------------------------------------------------
+
+#: Una clave cuyo base64 es todo "+" y "/": codificada para URL no deja un
+#: solo caracter base64 en claro. Es el caso que la redaccion dejaba pasar
+#: segun los bytes de cada clave, y por eso fallaba de forma intermitente.
+URL_HOSTIL = bytes([0xFB, 0xEF, 0xBE, 0xFF, 0xFF, 0xFF]) * 120
+
+
+def _pixel(raw: bytes) -> str:
+    import base64
+    from urllib.parse import quote
+    return "https://tercero.example/p.gif?k=" + quote(base64.b64encode(raw).decode(), safe="")
+
+
+def test_el_vault_reconoce_una_clave_escapada_para_url():
+    import base64
+    assert set(base64.b64encode(URL_HOSTIL).decode()) <= {"+", "/"}
+    with SecretVault() as vault:
+        vault.register(Tag.KEY_FILE, URL_HOSTIL)
+        url = _pixel(URL_HOSTIL)
+        assert vault.scan(url) == [], "la prueba necesita que la forma cruda no coincida"
+        assert Tag.KEY_FILE.value in vault.labels_in(url)
+
+
+def test_redact_url_conserva_el_destino_y_quita_la_query():
+    from firmascope.audit_core.secrets import redact_url
+    with SecretVault() as vault:
+        vault.register(Tag.KEY_FILE, URL_HOSTIL)
+        limpia = redact_url(_pixel(URL_HOSTIL), vault)
+    assert limpia.startswith("https://tercero.example/p.gif?")
+    assert "canary:KEY_FILE" in limpia
+    assert "%2B" not in limpia and "%2F" not in limpia
+
+
+def test_redact_url_no_toca_una_url_limpia():
+    from firmascope.audit_core.secrets import redact_url
+    with SecretVault() as vault:
+        vault.register(Tag.KEY_FILE, URL_HOSTIL)
+        url = "https://sitio.example/app.js?v=3"
+        assert redact_url(url, vault) == url
+
+
+def test_la_barrera_final_reconoce_la_forma_escapada():
+    with SecretVault() as vault:
+        vault.register(Tag.KEY_FILE, URL_HOSTIL)
+        with pytest.raises(AssertionError):
+            assert_no_secrets('{"url": "' + _pixel(URL_HOSTIL) + '"}', vault)
+
+
+def test_el_expediente_redacta_la_url_de_las_peticiones(tmp_path):
+    """Las peticiones se guardaban sin redactar: la clave de un pixel de
+    seguimiento llegaba entera a session.sqlite."""
+    import base64
+    from urllib.parse import quote
+
+    vault = SecretVault()
+    vault.register(Tag.KEY_FILE, URL_HOSTIL)
+    store = EvidenceStore(tmp_path, "sesion-url", vault=vault)
+    store.open_session("https://sitio.example", {"level": 3}, {})
+    store.add_request(RequestRecord(
+        timestamp=1.0, method="GET", url=_pixel(URL_HOSTIL),
+        host="tercero.example", registrable="tercero.example", third_party=True))
+    store.add_event(make_event(EventType.NETWORK_REQUEST, 1.0, url=_pixel(URL_HOSTIL)))
+    guardada = store.requests()[0]["url"]
+    store.close()
+
+    assert guardada.startswith("https://tercero.example/p.gif?")
+    escapada = quote(base64.b64encode(URL_HOSTIL).decode(), safe="").encode()
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            assert escapada[:64] not in path.read_bytes(), f"la clave aparece en {path.name}"

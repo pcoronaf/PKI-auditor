@@ -277,25 +277,33 @@ class Auditor:
         ok, _ = self.store.verify_chain()
         result.chain_ok = ok
 
-        result.reports = write_reports(
-            ReportInput(
-                config=self.config,
-                session=self.store.session_info(),
-                findings=[f.to_dict() for f in result.findings],
-                correlation=result.correlation,
-                static=result.static,
-                requests=requests,
-                scripts=scripts,
-                checkpoints=checkpoints,
-                events=[e.to_dict() for e in events],
-                catalog=engine.catalog(),
-                chain_head=self.store.chain_head,
-                chain_ok=ok,
-                agent_sha256=agent_sha256(),
-            ),
-            self.output_dir,
-            vault=self.vault if self.vault.alive else None,
-        )
+        try:
+            result.reports = write_reports(
+                ReportInput(
+                    config=self.config,
+                    session=self.store.session_info(),
+                    findings=[f.to_dict() for f in result.findings],
+                    correlation=result.correlation,
+                    static=result.static,
+                    requests=requests,
+                    scripts=scripts,
+                    checkpoints=checkpoints,
+                    events=[e.to_dict() for e in events],
+                    catalog=engine.catalog(),
+                    chain_head=self.store.chain_head,
+                    chain_ok=ok,
+                    agent_sha256=agent_sha256(),
+                ),
+                self.output_dir,
+                vault=self.vault if self.vault.alive else None,
+            )
+        except AssertionError as exc:
+            # assert_no_secrets es la ultima barrera: si algo sensible llego
+            # hasta el reporte, no se escribe. Se registra como error de la
+            # sesion (el mensaje solo nombra etiqueta y codificacion) en lugar
+            # de perder el resultado entero.
+            result.reports = {}
+            result.error = f"El reporte no se escribio: {exc}"
         return result
 
     # ------------------------------------------------------------------
