@@ -101,6 +101,19 @@ TRANSFORMS = REVERSIBLE_TRANSFORMS | OBSCURING_TRANSFORMS
 #: Constructores que envuelven datos conservando la procedencia.
 TRANSFORM_CONSTRUCTORS = frozenset({"Blob", "File", "FormData", "URLSearchParams", "Uint8Array", "DataView"})
 
+#: Consultas al DOM cuyo selector literal delata que elemento se obtiene.
+#:
+#: La minificacion borra los nombres de variable (``keyInput`` pasa a ser
+#: ``n``), pero no puede tocar los ids del HTML: ``getElementById("key-file")``
+#: sobrevive intacto y dice de que campo se trata.
+DOM_LOOKUPS = frozenset(
+    {"getElementById", "querySelector", "querySelectorAll", "getElementsByName",
+     "getElementsByClassName"}
+)
+
+#: Propiedades de un campo de formulario que entregan su contenido.
+DOM_CONTENT_PROPERTIES = frozenset({"value", "files"})
+
 #: Metodos que *acumulan* el argumento dentro del objeto receptor.
 #:
 #: A diferencia de una transformacion, aqui el dato no se consume: pasa a
