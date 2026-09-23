@@ -310,3 +310,83 @@ def test_nivel4_tres_sensores_sostienen_la_misma_fuga(lab, tmp_path):
     assert {"agent", "proxy", "canary"} <= set(chains[0].corroboration)
     # Y la CA efimera no sobrevive a la sesion.
     assert auditor.proxy is None
+
+
+# ----------------------------------------------------------------------
+# Laboratorios que ponen a prueba los supuestos de la herramienta
+# ----------------------------------------------------------------------
+
+def test_worker_la_instrumentacion_no_rompe_el_worker_del_sitio(lab, tmp_path):
+    """El agente se inyectaba envolviendo el worker en un blob:, y dentro de
+    un blob toda ruta relativa falla. El worker del sitio dejaba de funcionar:
+    la herramienta alteraba lo que auditaba."""
+    antes = len(lab.received.collected)
+    result = run_audit(lab, "demo-worker", tmp_path)
+
+    assert result.error == ""
+    recibidos = [c["path"] for c in lab.received.collected[antes:]]
+    assert "/collect/worker" in recibidos, "el worker del sitio no llego a ejecutarse"
+
+
+def test_worker_la_procedencia_cruza_postmessage(lab, tmp_path):
+    """Nivel 3, sin proxy: la fuga ocurre dentro del worker y solo puede
+    verla la instrumentacion, que necesita que la procedencia cruce
+    postMessage."""
+    from firmascope.evidence_store.store import EvidenceStore
+
+    result = run_audit(lab, "demo-worker", tmp_path)
+    assert status_of(result, "FS-KEY-001") is Status.OBSERVED
+
+    store = EvidenceStore(result.output_dir, result.session_id)
+    try:
+        del_worker = [e for e in store.events()
+                      if e.context == "worker" and e.type is EventType.NETWORK_REQUEST]
+    finally:
+        store.close()
+    assert any(Tag.KEY_FILE.value in e.tags for e in del_worker)
+
+
+def test_canales_laterales_y_tercero(lab, tmp_path):
+    """La contrasena en un beacon y el .key en la query de un pixel, hacia un
+    dominio de tercero. El pixel es una peticion GET sin cuerpo: solo se ve
+    buscando el canario en la URL."""
+    result = run_audit(lab, "demo-side-channels", tmp_path)
+
+    assert status_of(result, "FS-PWD-001") is Status.OBSERVED
+    assert status_of(result, "FS-KEY-001") is Status.OBSERVED
+    assert status_of(result, "FS-NET-001") is Status.OBSERVED
+
+
+def test_codigo_minificado(lab, tmp_path):
+    """Sin nombres de variable. La ejecucion no depende de ellos, y el analisis
+    estatico tampoco debe: la ruta se encuentra por las APIs y por los ids
+    del HTML, que la minificacion no toca."""
+    result = run_audit(lab, "demo-minified", tmp_path)
+
+    assert status_of(result, "FS-KEY-001") is Status.OBSERVED
+    assert status_of(result, "FS-PWD-001") is Status.OBSERVED
+    finding = next(f for f in result.findings if f.rule_id == "FS-CODE-001")
+    assert finding.status is Status.POTENTIAL
+
+
+def test_canales_laterales_el_expediente_no_guarda_la_clave_de_la_url(lab, tmp_path):
+    """La clave viajo en la query de un pixel. El reporte debe decir a donde
+    salio sin volver a escribirla, y el expediente tampoco puede contenerla."""
+    import base64
+    from urllib.parse import quote
+
+    config = AuditConfig(target=lab.url_for("demo-side-channels"),
+                         level=AuditLevel.LOCAL_SIGNING_TEST, output_dir=tmp_path, headless=True)
+    auditor = Auditor(config)
+    result = auditor.run(dwell=4.0, offline_dwell=3.0)
+
+    assert result.error == "", result.error
+    assert result.reports, "el reporte no se escribio"
+    b64 = base64.b64encode(auditor.credential.key_der).decode()
+    formas = [b64.encode(), quote(b64, safe="").encode()]
+    for path in result.output_dir.rglob("*"):
+        if not path.is_file() or path.parent.name == "credentials":
+            continue
+        blob = path.read_bytes()
+        for forma in formas:
+            assert forma[:48] not in blob, f"la clave aparece en {path.name}"

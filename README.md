@@ -146,8 +146,8 @@ Otras desviaciones deliberadas respecto de la especificación:
 | Addon de mitmproxy (nivel 4, CA efímera) | implementado, con pruebas e2e |
 | Pruebas TC-001..TC-006 | **verdes** |
 
-La suíte son 179 pruebas unitarias más 14 extremo a extremo que lanzan un
-Chromium real contra las cinco aplicaciones de laboratorio (dos de ellas en
+La suíte son 200 pruebas unitarias más 19 extremo a extremo que lanzan un
+Chromium real contra las ocho aplicaciones de laboratorio (dos de ellas en
 nivel 4, con el proxy interpuesto):
 
 ```bash
@@ -166,6 +166,9 @@ Lo que la herramienta concluye hoy sobre cada aplicación de laboratorio:
 | `demo-encrypted-exfiltration` | `FS-NET-002` OBSERVED, `FS-KEY-002` POTENTIAL |
 | `demo-server-sign` | `FS-KEY-001` y `FS-PWD-001` OBSERVED |
 | `demo-static-only` | sólo `FS-CODE-001` POTENTIAL |
+| `demo-worker` | `FS-KEY-001` OBSERVED — la fuga ocurre dentro de un Web Worker |
+| `demo-side-channels` | `FS-KEY-001`, `FS-PWD-001` y `FS-NET-001` OBSERVED — beacon y píxel hacia un tercero |
+| `demo-minified` | `FS-KEY-001` y `FS-PWD-001` OBSERVED, `FS-CODE-001` POTENTIAL — código empaquetado con terser |
 
 Las dos filas que más dicen son la primera y la última. Que `demo-safe` no
 produzca ningún hallazgo es lo que hace utilizable al resto del catálogo: una
@@ -173,6 +176,25 @@ herramienta que marca a las aplicaciones correctas no sirve para auditar
 ninguna. Y que `demo-static-only` produzca `POTENTIAL` sin producir
 `OBSERVED` es la separación entre los niveles 1 y 2: nada salió — eso es
 cierto — pero el código cargado puede hacerlo.
+
+Los tres últimos laboratorios existen para poner a prueba los supuestos de la
+herramienta, y cada uno encontró algo:
+
+- `demo-worker` mostró que la instrumentación **rompía** los workers del sitio:
+  los cargaba desde un `blob:`, donde toda ruta relativa falla. Ahora el
+  worker conserva su URL real y el agente se antepone a su script al
+  descargarlo. La procedencia además cruza `postMessage`, así que la fuga
+  desde el worker se ve en nivel 3 sin necesidad del proxy.
+- `demo-side-channels` mostró que un `.key` enviado en la query de un píxel
+  era invisible para CDP y el proxy, que solo miraban el cuerpo — y, peor,
+  que esa URL **se guardaba sin redactar en el expediente**. Ahora se buscan
+  canarios también en la URL (en su forma decodificada) y las peticiones se
+  redactan igual que los eventos.
+- `demo-minified` mostró que el análisis estático dependía de los nombres de
+  variable. Sin ellos no encontraba nada; y al corregirlo aparecieron dos
+  falsos positivos sobre la entrega de la firma (retornos que no distinguían
+  el punto de llamada, y nombres reutilizados en bloques). Ahora la ruta se
+  encuentra por las APIs y por los ids del HTML, que la minificación no toca.
 
 `demo-encrypted-exfiltration` merece una nota. El seguimiento de procedencia
 no atraviesa un bucle que construye una cadena carácter a carácter, así que
