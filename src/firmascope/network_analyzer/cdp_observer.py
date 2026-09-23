@@ -17,7 +17,7 @@ from collections import deque
 from typing import Any, Callable
 
 from ..audit_core.config import AuditConfig
-from ..audit_core.events import Event, EventType, Tag
+from ..audit_core.events import Event, EventType, Tag, now
 from ..audit_core.secrets import SecretVault
 from ..evidence_store.store import EvidenceStore, RequestRecord
 from . import canaries as canaries_mod
@@ -42,6 +42,8 @@ class NetworkObserver:
         self._sockets: dict[str, str] = {}
         self._sessions: list[Any] = []
         self.request_count = 0
+        #: Diferencia entre el reloj de pared y el reloj monotono de CDP.
+        self._clock_offset: float | None = None
 
     # ------------------------------------------------------------------
     def attach(self, page, context_name: str = "main") -> None:
@@ -95,6 +97,8 @@ class NetworkObserver:
         url = request.get("url", "")
         if url.startswith(("data:", "blob:", "chrome-extension:")):
             return
+        if params.get("wallTime") and params.get("timestamp"):
+            self._clock_offset = float(params["wallTime"]) - float(params["timestamp"])
         initiator = params.get("initiator", {}) or {}
         stack = _flatten_stack(initiator.get("stack"))
         body = _post_data(request)
@@ -153,13 +157,26 @@ class NetworkObserver:
                         context=context_name, origin=domains.host_of(url), sensor="cdp",
                         tags=tags, data=data))
 
+    def _wall_time(self, params: dict[str, Any]) -> float:
+        """Marca de pared para eventos que CDP solo fecha con su reloj monotono.
+
+        Solo ``requestWillBeSent`` trae ``wallTime``; de el se obtiene la
+        diferencia entre ambos relojes y se aplica al resto. Sin ella, la hora
+        de proceso es mejor aproximacion que una marca monotona, que no se
+        puede comparar con las de los demas sensores.
+        """
+        monotonic = params.get("timestamp")
+        if monotonic and self._clock_offset is not None:
+            return float(monotonic) + self._clock_offset
+        return now()
+
     def _on_responseReceived(self, params: dict[str, Any], context_name: str) -> None:
         record = self._requests.get(params.get("requestId", ""))
         response = params.get("response", {})
         if record is not None:
             self.store.update_request(record.id, status=int(response.get("status", 0)))
         self.emit(Event(EventType.NETWORK_RESPONSE, self.session_id,
-                        timestamp=params.get("timestamp") or 0.0, context=context_name,
+                        timestamp=self._wall_time(params), context=context_name,
                         sensor="cdp", data={
                             "url": response.get("url", ""),
                             "status": response.get("status"),
@@ -177,7 +194,7 @@ class NetworkObserver:
     def _on_loadingFailed(self, params: dict[str, Any], context_name: str) -> None:
         record = self._requests.get(params.get("requestId", ""))
         self.emit(Event(EventType.NETWORK_FAILED, self.session_id,
-                        timestamp=params.get("timestamp") or 0.0, context=context_name, sensor="cdp",
+                        timestamp=self._wall_time(params), context=context_name, sensor="cdp",
                         data={
                             "url": record.url if record else "",
                             "error": params.get("errorText", ""),

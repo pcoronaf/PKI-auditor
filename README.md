@@ -147,7 +147,7 @@ Otras desviaciones deliberadas respecto de la especificación:
 | Panel de control local (`--panel`) | implementado, con pruebas e2e |
 | Pruebas TC-001..TC-006 | **verdes** |
 
-La suíte son 241 pruebas unitarias más 25 extremo a extremo que lanzan un
+La suíte son 250 pruebas unitarias más 25 extremo a extremo que lanzan un
 Chromium real contra las nueve aplicaciones de laboratorio (dos de ellas en
 nivel 4, con el proxy interpuesto):
 

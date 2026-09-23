@@ -252,6 +252,44 @@ def test_net001_ignora_terceros_anteriores_al_acceso_a_la_clave(engine, config):
     assert verdict(engine, context, "FS-NET-001").status is Status.NOT_OBSERVED
 
 
+def test_net001_cargar_un_documento_no_adelanta_el_acceso_a_la_clave(engine, config):
+    """Caso real: analitica de terceros mientras el operador sube una
+    factura, antes de tocar el .key. No es trafico "tras el acceso a la clave"."""
+    documento = make_event(EventType.FILE_READ, -600.0, tags=[Tag.DOCUMENT], size=50263)
+    requests = [
+        {"id": "r1", "url": "https://c.go-mpulse.net/api/config.json", "method": "GET",
+         "timestamp": key_access()[0].timestamp - 300.0, "third_party": True,
+         "registrable_domain": "go-mpulse.net"},
+    ]
+    context = build(config, [documento] + key_access(), requests=requests)
+    assert verdict(engine, context, "FS-NET-001").status is Status.NOT_OBSERVED
+
+
+def test_net001_ignora_peticiones_hechas_con_la_red_aislada(engine, config):
+    """Con la red cortada la peticion no llega: el tercero no recibe nada."""
+    t = key_access()[0].timestamp
+    events = key_access() + [
+        make_event(EventType.NETWORK_OFF, 10.0),
+        make_event(EventType.NETWORK_ON, 100.0),
+    ]
+    requests = [
+        {"id": "r1", "url": "https://c.go-mpulse.net/api/config.json", "method": "GET",
+         "timestamp": t + 50.0, "third_party": True, "registrable_domain": "go-mpulse.net"},
+    ]
+    context = build(config, events, requests=requests)
+    assert verdict(engine, context, "FS-NET-001").status is Status.NOT_OBSERVED
+
+
+def test_solo_documentos_y_certificado_no_cuentan_como_material_privado(engine, config):
+    events = [
+        make_event(EventType.FILE_READ, 0.0, tags=[Tag.DOCUMENT], size=50263),
+        make_event(EventType.FILE_READ, 1.0, tags=[Tag.CERTIFICATE], size=1107),
+    ]
+    context = build(config, events)
+    assert context.first_key_access() is None
+    assert verdict(engine, context, "FS-KEY-001").status is Status.INCONCLUSIVE
+
+
 def test_net002_detecta_salida_binaria_opaca(engine, config):
     """El caso de demo-encrypted-exfiltration visto solo desde la red."""
     events = key_access() + [

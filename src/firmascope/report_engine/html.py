@@ -237,7 +237,9 @@ def _correlation(report: dict[str, Any]) -> str:
     blocks = []
     for chain in chains:
         latency = chain.get("latency_ms")
-        when = f"{latency} ms tras el acceso a la clave" if latency is not None else "instante no comparable"
+        # Sin latencia (salida previa al acceso a la clave, o marcas no
+        # comparables) no se afirma nada sobre el instante.
+        when = f" &middot; {latency} ms tras el acceso a la clave" if latency is not None else ""
         steps = "".join(
             f"<tr><td class=\"mono\">{esc(step.get('kind', ''))}</td>"
             f"<td>{esc(step.get('description', ''))}</td>"
@@ -250,7 +252,7 @@ def _correlation(report: dict[str, Any]) -> str:
             f"<h3>{esc(chain.get('verdict', ''))} &rarr; {esc(chain.get('destination', ''))}</h3>"
             f"<p class=\"narrative mono\">{esc(chain.get('narrative', ''))}</p>"
             f"<p class=\"meaning\">{'transmision directa' if chain.get('direct') else 'dato derivado'}"
-            f" &middot; {esc(when)} &middot; confianza {esc(chain.get('confidence', ''))}"
+            f"{when} &middot; confianza {esc(chain.get('confidence', ''))}"
             f" &middot; sensores: {esc(', '.join(chain.get('corroboration') or []))}</p>"
             "<table><thead><tr><th>Paso</th><th>Descripcion</th><th>Etiquetas</th>"
             f"<th>Sensor</th></tr></thead><tbody>{steps}</tbody></table>"
