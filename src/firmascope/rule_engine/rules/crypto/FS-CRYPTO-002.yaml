@@ -1,0 +1,20 @@
+id: FS-CRYPTO-002
+title: CryptoKey privada creada como extraible
+category: crypto
+severity: MEDIUM
+summary: Se importó, desenvolvió o generó una clave privada con extractable=true.
+description: |
+  Revisa las llamadas a `importKey`, `unwrapKey` y `generateKey` que producen
+  material privado y comprueba el valor del parámetro `extractable`. Para
+  `generateKey` se considera privada la generación de pares asimétricos (RSA,
+  EC, Ed25519).
+rationale: |
+  `extractable: false` es la diferencia entre "el código puede usar la clave" y
+  "el código puede quedarse con la clave". Es una decisión de una sola palabra
+  que el navegador hace cumplir, y en un flujo de firma casi nunca hay motivo
+  para renunciar a ella: se importa la clave, se firma y se descarta.
+
+  Este hallazgo no prueba que la clave se haya copiado. Señala que la barrera
+  que lo impediría no se activó.
+references:
+  - FR-006

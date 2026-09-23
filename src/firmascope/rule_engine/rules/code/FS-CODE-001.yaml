@@ -1,0 +1,41 @@
+id: FS-CODE-001
+title: Ruta potencial de clave hacia la red
+category: code
+severity: HIGH
+summary: El código cargado contiene una ruta capaz de llevar material sensible hasta un canal de salida, se ejecute o no.
+description: |
+  Resultado del análisis estático de nivel 2. Sobre el AST de cada script
+  cargado, FirmaScope propaga etiquetas de procedencia desde las fuentes
+  sensibles (input de archivo, FileReader, Blob, campo de contraseña, WebCrypto)
+  hasta los sumideros de salida (fetch, XHR, sendBeacon, WebSocket,
+  WebTransport, WebRTC, formularios, almacenamiento, `src`/`href`, navegación),
+  atravesando asignaciones, expresiones, transformaciones conocidas y llamadas a
+  funciones locales.
+
+  Cada ruta se reporta con su origen, la cadena de transformaciones, el sumidero,
+  la cadena de llamadas reconstruida y una confianza explícita:
+
+  - ALTA: flujo directo dentro de una misma función, desde una API reconocida.
+  - MEDIA: el flujo cruza una o dos fronteras de función, o atraviesa una
+    transformación.
+  - BAJA: la identificación descansa en heurísticas de nombre, o el análisis se
+    ejecutó en modo degradado sin AST.
+
+  El estado es siempre POTENTIAL, incluso cuando la ruta también se observó en
+  ejecución: esta regla habla de lo que el código *puede* hacer. Lo que ocurrió
+  lo dicen FS-KEY-001, FS-KEY-002 y FS-PWD-001.
+rationale: |
+  Es la regla que responde a la pregunta que una inspección de red no puede
+  contestar: qué haría este código en otra ejecución, con otro usuario, u otro
+  día. El código de exfiltración condicional, el que sólo se activa tras una
+  bandera remota o para ciertos usuarios, no aparece en la pestaña Network.
+
+  Sus límites son reales y deben leerse con el hallazgo: JavaScript no permite
+  un seguimiento perfecto de procedencia. El código minificado, el despacho
+  dinámico, `eval`, WebAssembly y las rutas que atraviesan bibliotecas de
+  terceros pueden ocultar flujos que existen. Ausencia de rutas no es ausencia
+  de capacidad.
+references:
+  - FR-009
+  - FR-010
+  - TC-006

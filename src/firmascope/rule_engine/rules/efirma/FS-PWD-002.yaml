@@ -1,0 +1,18 @@
+id: FS-PWD-002
+title: Contraseña persistida en almacenamiento del navegador
+category: efirma
+severity: HIGH
+summary: La contraseña de la clave privada se escribió en localStorage, sessionStorage, IndexedDB, CacheStorage o una cookie.
+description: |
+  Vigila las escrituras a almacenamiento persistente del navegador cuyo valor
+  lleva la etiqueta de procedencia de la contraseña, en cualquiera de los
+  almacenes instrumentados.
+rationale: |
+  El almacenamiento web no está compartimentado por script: cualquier código que
+  se ejecute en el mismo origen, incluidas las bibliotecas de terceros y las
+  etiquetas de analítica, puede leerlo. Guardar ahí la contraseña la expone a
+  todo el árbol de dependencias del sitio y la hace sobrevivir al cierre de la
+  pestaña.
+references:
+  - FR-006
+  - TC-005

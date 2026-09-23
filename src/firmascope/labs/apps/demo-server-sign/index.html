@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>demo-server-sign</title>
+<link rel="stylesheet" href="/shared/lab.css">
+</head>
+<body>
+<main>
+  <h1>demo-server-sign</h1>
+  <p class="sub">Aplicacion de laboratorio de FirmaScope &mdash; envia clave y contrasena al servidor</p>
+  <p class="warn">Aplicacion de prueba. No usar credenciales reales: emplea las credenciales
+  sinteticas generadas por <code>firmascope credentials new</code>.</p>
+
+  <div class="card">
+    <label for="cer-file">Certificado (.cer)</label>
+    <input type="file" id="cer-file" accept=".cer,.crt,.der">
+
+    <label for="key-file">Clave privada (.key)</label>
+    <input type="file" id="key-file" accept=".key,.pem">
+
+    <label for="password">Contrase&ntilde;a de la clave privada</label>
+    <input type="password" id="password" autocomplete="off">
+
+    <button id="sign" type="button">Firmar documento</button>
+    <div id="status" data-state="info">Listo.</div>
+  </div>
+
+  <div class="card">
+    <label>Documento a firmar</label>
+    <pre id="document">(sin cargar)</pre>
+    <label>Registro</label>
+    <pre id="log"></pre>
+  </div>
+</main>
+<script src="/shared/efirma.js"></script>
+<script src="/shared/lab.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>

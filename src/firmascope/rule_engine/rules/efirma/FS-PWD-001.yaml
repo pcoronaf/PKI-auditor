@@ -1,0 +1,24 @@
+id: FS-PWD-001
+title: Contraseña de la clave privada transmitida
+category: efirma
+severity: CRITICAL
+summary: La contraseña que protege el .key salió del navegador.
+description: |
+  Observa la lectura del campo de contraseña asociado a la firma y sigue ese
+  valor hasta cualquier canal de salida, tanto si viaja en claro como si lo hace
+  en una codificación reversible (base64, URL-encoding, UTF-16) o transformado.
+
+  El motor distingue ambos casos en el detalle del hallazgo: una transmisión
+  directa y una derivada tienen implicaciones distintas, aunque ambas
+  constituyan transmisión.
+rationale: |
+  La contraseña es la mitad del secreto: sin ella, el .key cifrado es
+  inservible. Un sitio que recibe ambas piezas puede firmar en nombre del
+  titular en cualquier momento posterior, sin su intervención.
+
+  Un caso frecuente y no intencionado es que la contraseña acabe en el cuerpo de
+  un formulario enviado completo al servidor, o en un payload de telemetría que
+  serializa el estado del formulario.
+references:
+  - FR-005
+  - TC-003

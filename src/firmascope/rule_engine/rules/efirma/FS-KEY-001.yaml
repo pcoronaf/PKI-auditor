@@ -1,0 +1,26 @@
+id: FS-KEY-001
+title: Clave privada transmitida directamente
+category: efirma
+severity: CRITICAL
+summary: El archivo .key o la clave privada descifrada salieron del navegador sin transformar.
+description: |
+  Busca material de clave privada saliendo por cualquier canal (fetch, XHR,
+  sendBeacon, WebSocket, WebTransport, WebRTC, formularios, navegaciones o URLs
+  de recurso) en una forma que lo haga reconocible: los bytes en bruto, o una
+  codificación reversible como base64, base64url, hexadecimal o URL-encoding.
+
+  Se apoya en dos fuentes de evidencia independientes. La primera es el canario:
+  FirmaScope conoce todas las representaciones de la credencial sintética y las
+  busca dentro de los cuerpos salientes, de modo que encontrar una de ellas
+  prueba que los bytes estaban ahí. La segunda es la instrumentación del
+  navegador, que etiqueta el dato en el momento en que se lee el archivo y sigue
+  su procedencia hasta el sumidero.
+rationale: |
+  La clave privada de una e.firma es el elemento crítico del esquema: quien la
+  posee, junto con la contraseña, puede firmar en nombre del titular. Un sitio
+  que la transmite obliga al usuario a confiar plenamente en el servidor, en su
+  operador y en cualquiera que comprometa ese servidor en el futuro.
+references:
+  - FR-002
+  - FR-004
+  - TC-002

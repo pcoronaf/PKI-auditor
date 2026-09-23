@@ -1,0 +1,27 @@
+id: FS-NET-002
+title: Datos binarios sin clasificar tras el acceso a la clave
+category: network
+severity: MEDIUM
+summary: Salieron cuerpos binarios cuya procedencia FirmaScope no pudo establecer, después del acceso al material de la clave.
+description: |
+  Selecciona las salidas posteriores al primer acceso a la clave que cumplen
+  tres condiciones: el cuerpo es binario (ArrayBuffer, Blob, vista tipada o
+  `application/octet-stream`), supera los 64 bytes, y ninguna etiqueta de
+  procedencia ni coincidencia de canario permitió clasificarlo.
+
+  El detalle del hallazgo incluye la distancia temporal respecto al acceso a la
+  clave, porque una salida binaria decenas de milisegundos después del
+  procesamiento de la clave privada es cualitativamente distinta de una que
+  ocurre minutos más tarde.
+rationale: |
+  Es la red de seguridad del catálogo. El seguimiento de procedencia en
+  JavaScript es aproximado: una transformación realizada fuera de las APIs
+  instrumentadas, dentro de WebAssembly o en una biblioteca que copia bytes a
+  mano, puede romper la cadena de etiquetas.
+
+  Esta regla no afirma que haya exfiltración. Afirma que hay un dato opaco
+  saliendo en un momento sensible, y que la herramienta no puede descartarlo.
+  Es material para revisión manual, no una conclusión.
+references:
+  - FR-003
+  - FR-015
