@@ -20,6 +20,17 @@ recomendado firma dentro de la ventana de aislamiento.
 
 ## Procedimiento recomendado
 
+Todo lo que sigue puede hacerse **sin escribir un solo argumento**: `firmascope
+audit` abre un asistente que pregunta el sitio, el nivel, el tipo de credencial
+y el aislamiento, y permite revisarlo antes de arrancar. Los argumentos que
+aparecen abajo son el equivalente no interactivo, útil para repetir una prueba
+exactamente igual; cuando se indican, el asistente los toma como respuesta
+precargada y no vuelve a preguntarlos.
+
+```bash
+firmascope options        # qué se puede configurar, y qué puede cambiarse en marcha
+```
+
 ### 1. Caracteriza el portal con una credencial sintética
 
 ```bash
@@ -40,6 +51,13 @@ e.firma real.
 
 ### 2. Repite la prueba con tu e.firma, firmando con la red cortada
 
+Con el asistente, elige «Mi e.firma real» en *Credencial a usar*: aparece
+marcada como peligrosa, el asistente muestra los riesgos residuales y exige que
+escribas `ACEPTO`. Después pide las rutas del `.key` y del `.cer`, que comprueba
+que existan, y la contraseña por `getpass`.
+
+El equivalente no interactivo:
+
 ```bash
 firmascope audit https://portal.ejemplo.mx \
   --credentials real \
@@ -48,9 +66,8 @@ firmascope audit https://portal.ejemplo.mx \
   --isolation full --level 4
 ```
 
-FirmaScope pide confirmación escrita (`ACEPTO`) y la contraseña por `getpass`
-(nunca por argumento: los argumentos quedan en el historial del shell y son
-visibles en la lista de procesos).
+La contraseña nunca se pasa por argumento: los argumentos quedan en el historial
+del shell y son visibles en la lista de procesos. Se pide siempre por `getpass`.
 
 El flujo por etapas hace el trabajo:
 
@@ -105,7 +122,12 @@ En cada etapa la interfaz acepta:
 | `cancel` / `q` | **cancelar**: restablece la red, cierra el expediente y conserva lo observado |
 | `url <dirección>` | abrir una página (si arrancaste sin URL, o para navegar) |
 | `offline` / `online` | forzar el estado de red sin cambiar de etapa |
+| `config` | cambiar lo que puede cambiarse en marcha (aislamiento, hosts permitidos) |
 | `status`, `stages`, `help` | consultar estado |
+
+Lo que **no** aparece en `config` es deliberado: cambiar el nivel de auditoría o
+el tipo de credencial a mitad de sesión cambiaría el significado de lo ya
+registrado, así que exige una sesión nueva.
 
 El estado de red se deriva de la etapa destino, no se aplica como un cambio
 incremental. Por eso retroceder de la etapa 4 a la 2 restablece la red sola, y
@@ -114,6 +136,8 @@ cancelar nunca te deja con el navegador aislado.
 `Ctrl-C` equivale a `cancel`: el expediente se cierra correctamente.
 
 ### Arrancar sin URL
+
+El asistente deja vacío el campo *Sitio a auditar* si se pulsa Enter. También:
 
 ```bash
 firmascope audit --credentials real --key ... --cert ...
