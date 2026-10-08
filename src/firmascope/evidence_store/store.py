@@ -133,10 +133,15 @@ class ScriptRecord:
 class EvidenceStore:
     """Persistencia encadenada de la sesion."""
 
-    def __init__(self, root: Path, session_id: str, vault: SecretVault | None = None):
+    def __init__(self, root: Path, session_id: str, vault: SecretVault | None = None,
+                 privacy: Any | None = None):
         self.root = Path(root)
         self.session_id = session_id
         self.vault = vault
+        #: :class:`~firmascope.audit_core.config.PrivacyPolicy` de la sesion.
+        #: Con credenciales reales redacta nombres de archivo, identificadores
+        #: fiscales y digests globales antes de que lleguen al disco.
+        self.privacy = privacy
         self.root.mkdir(parents=True, exist_ok=True)
         for sub in ("scripts", "screenshots", "evidence"):
             (self.root / sub).mkdir(exist_ok=True)
@@ -181,7 +186,7 @@ class EvidenceStore:
     # -- eventos --------------------------------------------------------
     def add_event(self, event: Event) -> Event:
         """Persiste un evento, redactandolo y encadenandolo."""
-        event.data = redact(event.data, self.vault)
+        event.data = redact(event.data, self.vault, self.privacy)
         payload = event.to_dict()
         payload.pop("seq", None)
         serialized = chain.canonical(payload)
