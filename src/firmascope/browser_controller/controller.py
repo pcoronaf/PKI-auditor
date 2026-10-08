@@ -27,6 +27,7 @@ from ..evidence_store.store import EvidenceStore, ScriptRecord
 from ..instrumentation_agent.loader import DEFAULT_CHANNEL, build_init_script, record_to_event
 from ..network_analyzer import domains
 from ..network_analyzer.cdp_observer import NetworkObserver
+from .isolation import DEFAULT_STAGES, NetworkIsolation, Stage, StagedOfflineTest
 
 
 class BrowserController:
@@ -45,9 +46,9 @@ class BrowserController:
         self.context: BrowserContext | None = None
         self.page: Page | None = None
         self.observer: NetworkObserver | None = None
+        self.isolation: NetworkIsolation | None = None
 
         self.browser_version = ""
-        self.offline = False
         self._frame_names: dict[Any, str] = {}
         self._frame_counter = 0
         self._worker_counter = 0
@@ -87,9 +88,14 @@ class BrowserController:
         self.context.set_default_timeout(30_000)
 
         self.context.expose_binding(DEFAULT_CHANNEL, self._on_agent_record)
-        self.context.add_init_script(build_init_script(self.session_id, DEFAULT_CHANNEL))
+        self.context.add_init_script(build_init_script(
+            self.session_id, DEFAULT_CHANNEL,
+            redact_names=bool(getattr(self.config.privacy, "redact_filenames", False))))
 
         self.observer = NetworkObserver(self.session_id, self.store, self.config, self.emit, self.vault)
+        self.isolation = NetworkIsolation(
+            self.context, self.config, self.emit, self.session_id,
+            vault=self.vault, store=self.store)
 
         self.context.on("page", self._on_page)
         self.context.on("serviceworker", self._on_service_worker)
@@ -131,6 +137,9 @@ class BrowserController:
         page.on("worker", self._on_worker)
         page.on("frameattached", self._on_frame_attached)
         page.on("console", self._on_console)
+        # Tambien cuenta como navegacion exitosa la que hace el operador a mano
+        # en modo headful: sin esto, aislar se negaria por falta de carga previa.
+        page.on("load", self._on_page_load)
         page.on("pageerror", lambda err: self.emit(Event(
             EventType.AGENT_ERROR, self.session_id, sensor="browser",
             data={"kind": "pageerror", "message": str(err)[:300]})))
@@ -163,6 +172,10 @@ class BrowserController:
     def _on_service_worker(self, worker) -> None:
         self.emit(Event(EventType.CONTEXT_CREATED, self.session_id, context="service-worker",
                         sensor="browser", data={"kind": "service-worker", "url": worker.url}))
+
+    def _on_page_load(self, page) -> None:
+        if self.isolation is not None:
+            self.isolation.navigation_succeeded = True
 
     def _on_console(self, message) -> None:
         if message.type in ("error", "warning"):
@@ -234,26 +247,56 @@ class BrowserController:
     # ------------------------------------------------------------------
     def goto(self, url: str, wait_until: str = "load", timeout: float = 30_000) -> None:
         assert self.page is not None
+        if self.offline:
+            # Navegar con la red aislada deja una pagina en blanco. Es la causa
+            # habitual del sintoma "no carga la pagina" al reordenar las etapas.
+            self.emit(Event(
+                EventType.AGENT_ERROR, self.session_id, sensor="controller",
+                data={"kind": "navigation-while-isolated", "url": url,
+                      "error": "se esta navegando con la red aislada; la carga fallara. "
+                               "Restablezca la red (etapa ONLINE) antes de navegar"}))
         try:
             self.page.goto(url, wait_until=wait_until, timeout=timeout)
+            if self.isolation is not None:
+                self.isolation.navigation_succeeded = True
         except Exception as exc:
             self.emit(Event(EventType.AGENT_ERROR, self.session_id, sensor="browser",
                             data={"kind": "navigation", "url": url, "error": str(exc)[:300]}))
         self.pump()
 
-    def set_offline(self, offline: bool, reason: str = "") -> None:
-        """Aisla o restablece la red sin cerrar el navegador (FR-007)."""
-        assert self.context is not None
-        self.context.set_offline(offline)
-        self.offline = offline
-        event_type = EventType.NETWORK_OFF if offline else EventType.NETWORK_ON
-        self.emit(Event(event_type, self.session_id, sensor="controller",
-                        data={"reason": reason, "mechanism": "CDP Network.emulateNetworkConditions"}))
-        self.store.add_checkpoint(
-            name="network-off" if offline else "network-on",
-            network="OFFLINE" if offline else "ONLINE",
-            detail=reason,
-        )
+    @property
+    def offline(self) -> bool:
+        """True si la red del navegador esta aislada ahora mismo."""
+        return self.isolation is not None and self.isolation.engaged
+
+    def preload(self, timeout: float | None = None) -> bool:
+        """Espera a que la red se calme, para poder aislar sin romper la pagina."""
+        if self.isolation is None:
+            return False
+        return self.isolation.preload(self.page, timeout)
+
+    def set_offline(self, offline: bool, reason: str = "") -> bool:
+        """Aisla o restablece la red sin cerrar el navegador (FR-007).
+
+        El aislamiento aborta las peticiones nuevas en lugar de apagar la pila
+        de red: la pagina ya cargada sigue operativa y cada intento de salida
+        queda registrado como evidencia. Devuelve el estado efectivo.
+        """
+        if self.isolation is None:
+            return False
+        if offline:
+            if self.config.isolation.preload_before_isolating:
+                self.isolation.preload(self.page)
+            return self.isolation.engage(reason)
+        return self.isolation.release(reason)
+
+    def staged_offline_test(self, stages: list[Stage] | None = None) -> StagedOfflineTest:
+        """Crea la prueba de firma por etapas sobre esta sesion."""
+        if self.isolation is None:
+            raise RuntimeError("el navegador no esta iniciado")
+        return StagedOfflineTest(
+            self, self.isolation, self.emit, self.session_id,
+            stages=stages or list(DEFAULT_STAGES))
 
     def checkpoint(self, name: str, detail: str = "") -> dict:
         record = self.store.add_checkpoint(
