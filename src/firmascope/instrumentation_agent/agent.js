@@ -26,6 +26,9 @@
   var CHANNEL = CFG.channel || '__firmascope_report';
   var MAX_QUEUE = CFG.maxQueue || 5000;
   var MAX_TAINTED_STRINGS = 64;
+  /* Con una e.firma real el nombre de archivo contiene el RFC del titular: no
+   * debe cruzar el puente hacia Python. Se emite solo la extension. */
+  var REDACT_NAMES = CFG.redactNames === true;
 
   /* ---------------------------------------------------------------- */
   /* Referencias originales (capturadas antes de que el sitio las toque) */
@@ -326,6 +329,14 @@
     return LBL.DOCUMENT;
   }
 
+  /* Nombre de archivo apto para emitir: completo, o solo su extension. */
+  function safeFileName(name) {
+    var text = name ? String(name) : '';
+    if (!REDACT_NAMES) { return text.slice(0, 120); }
+    var dot = text.lastIndexOf('.');
+    return dot > 0 ? '<redactado' + text.slice(dot).toLowerCase() + '>' : '<redactado>';
+  }
+
   /* ---------------------------------------------------------------- */
   /* Envoltura generica                                                */
   /* ---------------------------------------------------------------- */
@@ -364,7 +375,7 @@
           var label = labelForFile(file);
           taint(file, [label]);
           var record = {
-            name: String(file.name).slice(0, 120),
+            name: safeFileName(file.name),
             size: file.size,
             mime: file.type || '',
             accept: el.accept || '',
@@ -393,7 +404,7 @@
             var f = dt.files[i];
             var label = labelForFile(f);
             taint(f, [label]);
-            emit('FILE_SELECTED', { name: String(f.name).slice(0, 120), size: f.size, via: 'drop' }, [label]);
+            emit('FILE_SELECTED', { name: safeFileName(f.name), size: f.size, via: 'drop' }, [label]);
           }
         }
       } catch (e) { /* ignorado */ }
@@ -414,7 +425,7 @@
             method: method,
             size: blob && blob.size ? blob.size : 0,
             mime: (blob && blob.type) || '',
-            name: (blob && blob.name) ? String(blob.name).slice(0, 120) : ''
+            name: (blob && blob.name) ? safeFileName(blob.name) : ''
           }, labels, source);
           try {
             self_.addEventListener('loadend', function () {
@@ -1011,6 +1022,53 @@
   });
 
   /* ================================================================ */
+  /* Estado de conectividad emulado                                    */
+  /* ================================================================ */
+  /*
+   * El aislamiento de red de FirmaScope aborta peticiones en lugar de apagar
+   * la pila de red, para poder registrar los intentos de salida. Eso deja
+   * `navigator.onLine` en true, lo que delataria la prueba a una aplicacion
+   * que lo consulte. Aqui se emula el valor y se disparan los eventos
+   * online/offline, de modo que el sitio vea un corte convincente.
+   *
+   * Es reversible: `setOnline(null)` devuelve el valor nativo.
+   */
+  var onlineOverride = null;
+
+  guard('online-flag', function () {
+    var nav = G.navigator;
+    if (!nav) { return; }
+    var holder = Object.getPrototypeOf(nav) || nav;
+    var descriptor = O.getOwnPropertyDescriptor(holder, 'onLine');
+    if (!descriptor || !descriptor.get) {
+      holder = nav;
+      descriptor = O.getOwnPropertyDescriptor(holder, 'onLine');
+    }
+    if (!descriptor || !descriptor.get) { return; }
+    var nativeGet = descriptor.get;
+    O.defineProperty(holder, 'onLine', {
+      configurable: true,
+      enumerable: descriptor.enumerable,
+      get: function () {
+        if (onlineOverride === null) { return nativeGet.call(this); }
+        return onlineOverride;
+      }
+    });
+  });
+
+  function setOnline(value) {
+    var previous = onlineOverride;
+    onlineOverride = (value === null || value === undefined) ? null : !!value;
+    if (previous === onlineOverride) { return onlineOverride; }
+    try {
+      if (typeof Event === 'function') {
+        G.dispatchEvent(new Event(onlineOverride === false ? 'offline' : 'online'));
+      }
+    } catch (e) { /* ignorado */ }
+    return onlineOverride;
+  }
+
+  /* ================================================================ */
   /* Workers: instrumentacion de contextos hijos                       */
   /* ================================================================ */
   function agentSource() {
@@ -1122,6 +1180,9 @@
     dropped: function () { return dropped; },
     failures: function () { return failures.slice(); },
     flush: flush,
+    /* Conectividad emulada durante el aislamiento de red. */
+    setOnline: setOnline,
+    isOnline: function () { return onlineOverride === null ? null : onlineOverride; },
     /* Marca de procedencia manual: la usan las credenciales sinteticas. */
     mark: function (value, labels) { return taint(value, labels); },
     labels: function (value) { return labelsOf(value); },
