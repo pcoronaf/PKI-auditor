@@ -28,7 +28,7 @@ from ..static_analyzer.analyzer import StaticReport
 
 #: Marca temporal minima considerada "epoch plausible" (2001-09-09).
 #: Algunos eventos de CDP traen tiempos monotonos desde el arranque del
-#: navegador; compararlos con tiempos de pared produciria ordenes falsos.
+#: navegador; compararlos con tiempos de pared producuria ordenes falsos.
 MIN_EPOCH = 1_000_000_000.0
 
 #: Codificaciones de canario que demuestran transmision *directa* del material.
@@ -63,8 +63,36 @@ class AuditContext:
         wanted = {t.value if isinstance(t, Tag) else t for t in tags}
         return [e for e in self.events if wanted & set(e.tags)]
 
+    def __post_init__(self) -> None:
+        if self.correlation is None:
+            from ..correlation_engine import correlate
+            self.correlation = correlate(self.events)
+
     def egress_events(self) -> list[Event]:
-        return [e for e in self.events if e.type in EGRESS_EVENTS]
+        """Salidas observadas, una por peticion real.
+
+        La correlacion une las observaciones de los distintos sensores sobre una
+        misma peticion. Sin ella, una exfiltracion vista por el agente, por CDP
+        y por el aislamiento se contaria tres veces, y el intento que el
+        aislamiento abortó aparecería tambien como salida consumada.
+        """
+        events = [e for e in self.events if e.type in EGRESS_EVENTS]
+        if self.correlation is None:
+            return events
+        return [e for e in events if self.correlation.is_primary(e)]
+
+    def was_blocked(self, event: Event) -> bool:
+        """``True`` si la peticion que este evento observa no llego a salir."""
+        if self.correlation is not None:
+            return self.correlation.is_blocked(event)
+        return bool(event.data.get("blocked"))
+
+    def egress_host(self, event: Event) -> str:
+        """Destino de una salida, con puerto, tomado de la URL y no del sensor."""
+        group = self.correlation.group_of(event) if self.correlation else None
+        if group is not None and group.netloc:
+            return group.netloc
+        return str(event.data.get("host") or "")
 
     def key_access_events(self) -> list[Event]:
         return [e for e in self.events if e.type in KEY_ACCESS_EVENTS]
@@ -149,8 +177,22 @@ class AuditContext:
 
     # -- egress etiquetado -----------------------------------------------
     def canary_matches(self, event: Event) -> list[dict[str, Any]]:
+        """Coincidencias de canario de la peticion, no solo de una observacion.
+
+        El canario lo encuentra quien ve el cuerpo (CDP o proxy); la procedencia
+        la conoce el agente. Unir ambas es lo que permite afirmar a la vez *que*
+        salio y *de donde* venia.
+        """
+        if self.correlation is not None:
+            return self.correlation.enriched_matches(event)
         matches = event.data.get("canary_matches")
         return list(matches) if isinstance(matches, list) else []
+
+    def event_tags(self, event: Event) -> set[str]:
+        """Etiquetas de la peticion, uniendo lo que vio cada sensor."""
+        if self.correlation is not None:
+            return self.correlation.enriched_tags(event)
+        return set(event.tags)
 
     def direct_egress(self, *labels: Tag | str) -> list[Event]:
         """Egress que transporta el material *tal cual* (sin transformar).
@@ -164,7 +206,7 @@ class AuditContext:
         wanted = {t.value if isinstance(t, Tag) else t for t in labels}
         out: list[Event] = []
         for event in self.egress_events():
-            tags = set(event.tags)
+            tags = self.event_tags(event)
             matches = self.canary_matches(event)
             if any(m.get("label") in wanted and m.get("encoding") in DIRECT_ENCODINGS for m in matches):
                 out.append(event)
@@ -178,7 +220,7 @@ class AuditContext:
         wanted = {t.value if isinstance(t, Tag) else t for t in labels}
         out: list[Event] = []
         for event in self.egress_events():
-            tags = set(event.tags)
+            tags = self.event_tags(event)
             if wanted & tags and Tag.DERIVED.value in tags:
                 out.append(event)
         return out
@@ -187,7 +229,7 @@ class AuditContext:
         wanted = {t.value if isinstance(t, Tag) else t for t in labels}
         out: list[Event] = []
         for event in self.egress_events():
-            if wanted & set(event.tags):
+            if wanted & self.event_tags(event):
                 out.append(event)
                 continue
             if any(m.get("label") in wanted for m in self.canary_matches(event)):
@@ -198,7 +240,7 @@ class AuditContext:
         """Salidas binarias sin clasificar: candidatas a exfiltracion opaca."""
         out: list[Event] = []
         for event in self.egress_events():
-            tags = set(event.tags)
+            tags = self.event_tags(event)
             if tags - {Tag.UNCLASSIFIED.value}:
                 continue  # ya esta clasificado por otra via
             size = int(event.data.get("body_size") or event.data.get("size") or 0)

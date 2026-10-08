@@ -28,13 +28,22 @@ NOT_OBSERVED_CAVEAT = (
 # Utilidades
 # ----------------------------------------------------------------------
 
-def _hosts(events: Iterable[Event], limit: int = 4) -> list[str]:
+def _hosts(events: Iterable[Event], limit: int = 4,
+           context: AuditContext | None = None) -> list[str]:
+    """Destinos de una serie de salidas, sin repetirlos.
+
+    El host se toma de la URL y no del campo que anadio cada sensor: el agente
+    lo reporta con puerto y CDP sin el, y la misma salida acabaria nombrada dos
+    veces en el mismo hallazgo.
+    """
     seen: list[str] = []
     for event in events:
-        host = str(event.data.get("host") or "")
+        host = context.egress_host(event) if context is not None else ""
         if not host:
             url = str(event.data.get("url") or "")
             host = url.split("//", 1)[-1].split("/", 1)[0] if "//" in url else url
+        if not host:
+            host = str(event.data.get("host") or "")
         if host and host not in seen:
             seen.append(host)
         if len(seen) >= limit:
@@ -42,11 +51,21 @@ def _hosts(events: Iterable[Event], limit: int = 4) -> list[str]:
     return seen
 
 
-def _destinations(events: Sequence[Event]) -> str:
-    hosts = _hosts(events)
+def _destinations(events: Sequence[Event], context: AuditContext | None = None) -> str:
+    hosts = _hosts(events, context=context)
     if not hosts:
         return "un destino no identificado"
     return ", ".join(hosts)
+
+
+def _egress_line(context: AuditContext, event: Event, *,
+                 blocked_label: str = "BLOQUEADO por el aislamiento",
+                 extra: str = "") -> str:
+    """Una linea de detalle por salida, diciendo si salio o no."""
+    state = blocked_label if context.was_blocked(event) else "ENVIADO"
+    host = context.egress_host(event) or event.data.get("url", "")
+    return (f"- [{state}] {_channel_label(event)} hacia {host} "
+            f"({event.data.get('body_size', 0)} bytes{extra})")
 
 
 def _delta_ms(context: AuditContext, event: Event) -> int | None:
@@ -79,18 +98,24 @@ def _channel_label(event: Event) -> str:
     return kinds.get(event.type, event.type.value)
 
 
-def _split_blocked(events: Sequence[Event]) -> tuple[list[Event], list[Event]]:
+def _split_blocked(context: AuditContext,
+                   events: Sequence[Event]) -> tuple[list[Event], list[Event]]:
     """Separa las salidas que de verdad ocurrieron de los intentos bloqueados.
 
     Con el aislamiento activo, FirmaScope aborta la peticion antes de que salga.
     La distincion es la diferencia entre "su clave esta fuera" y "el sitio lo
-    intento y no pudo": con una credencial real, lo primero obliga a revocar y
-    lo segundo no.
+    intento y no pudo": con una credencial real, lo primero obliga a revocar la
+    e.firma y lo segundo no.
+
+    La pregunta no se puede responder evento por evento, porque el sensor que
+    *vio* la peticion no es el que la *nego*: el agente la intercepta en la
+    pagina y no sabe como acabo, y el aislamiento la aborta sin conocer la
+    procedencia del dato. Se consulta la correlacion, que reune ambas vistas.
     """
     sent: list[Event] = []
     blocked: list[Event] = []
     for event in events:
-        (blocked if event.data.get("blocked") else sent).append(event)
+        (blocked if context.was_blocked(event) else sent).append(event)
     return sent, blocked
 
 
@@ -103,6 +128,42 @@ def _static_private_paths(context: AuditContext, channels: Sequence[str] = ()) -
     return paths
 
 
+def _static_unclassified_paths(context: AuditContext,
+                               channels: Sequence[str] = ()) -> list[Any]:
+    """Rutas de material que entro por una fuente reconocida y no se tipifico.
+
+    Son el caso del patron canonico de exfiltracion: ``input.files[0]`` ->
+    ``FileReader`` -> ``fetch`` no nombra la clave en ninguna parte, asi que no
+    puede afirmarse que lo que viaja sea el ``.key``; tampoco puede afirmarse
+    que no lo sea. Se reportan aparte de las rutas privadas, con esa diferencia
+    escrita en el hallazgo, en lugar de descartarlas o de ascenderlas.
+    """
+    if context.static is None:
+        return []
+    paths = [p for p in context.static.paths
+             if not p.private and Tag.UNCLASSIFIED.value in p.labels]
+    if channels:
+        paths = [p for p in paths if p.channel in channels]
+    return paths
+
+
+def _describe_paths(paths: Sequence[Any], limit: int = 8) -> str:
+    lines = []
+    for path in paths[:limit]:
+        chain = " -> ".join(path.call_chain) if path.call_chain else "(cadena no reconstruida)"
+        transforms = " -> ".join(path.transforms) if path.transforms else "sin transformacion"
+        lines.append(
+            f"- {path.file_label}:{path.sink_line} [{path.confidence.value}]\n"
+            f"    source:    {path.source.name} ({path.source.snippet})\n"
+            f"    transform: {transforms}\n"
+            f"    sink:      {path.sink_name} ({path.sink_snippet})\n"
+            f"    llamadas:  {chain}"
+        )
+    if len(paths) > limit:
+        lines.append(f"- ... y {len(paths) - limit} rutas mas en el expediente.")
+    return "\n".join(lines)
+
+
 # ----------------------------------------------------------------------
 # Clave privada
 # ----------------------------------------------------------------------
@@ -111,26 +172,22 @@ def _static_private_paths(context: AuditContext, channels: Sequence[str] = ()) -
 def key_file_transmitted(context: AuditContext, meta) -> RuleResult:
     hits = context.direct_egress(Tag.KEY_FILE, Tag.PRIVATE_KEY)
     if hits:
-        sent, blocked = _split_blocked(hits)
+        sent, blocked = _split_blocked(context, hits)
         detail_lines = []
         for event in hits[:6]:
             matches = context.canary_matches(event)
             encodings = ", ".join(sorted({m.get("encoding", "") for m in matches})) or "etiquetado por instrumentacion"
-            state = "BLOQUEADO por el aislamiento" if event.data.get("blocked") else "ENVIADO"
             detail_lines.append(
-                f"- [{state}] {_channel_label(event)} hacia "
-                f"{event.data.get('host') or event.data.get('url', '')} "
-                f"({event.data.get('body_size', 0)} bytes; evidencia: {encodings})"
-            )
+                _egress_line(context, event, extra=f"; evidencia: {encodings}"))
         if sent:
             summary = (f"El material de la clave privada salio del navegador hacia "
-                       f"{_destinations(sent)}.")
+                       f"{_destinations(sent, context)}.")
             detail_head = "Salidas observadas:"
         else:
             summary = (f"El sitio intento enviar el material de la clave privada hacia "
-                       f"{_destinations(blocked)}; el aislamiento de red lo impidio.")
+                       f"{_destinations(blocked, context)}; el aislamiento de red lo impidio.")
             detail_head = (
-                "Ninguna de estas salidas llego a producirse: FirmaScope las aborto. "
+                "Ninguna de estas salidas llego a producirse: FirmaScope las abortó. "
                 "El intento es, sin embargo, evidencia de primer orden sobre lo que el "
                 "sitio hace con la clave cuando tiene red.")
         return RuleResult(
@@ -157,24 +214,20 @@ def key_file_transmitted(context: AuditContext, meta) -> RuleResult:
 def key_derived_transmitted(context: AuditContext, meta) -> RuleResult:
     hits = context.derived_egress(Tag.KEY_FILE, Tag.PRIVATE_KEY)
     if hits:
-        sent, blocked = _split_blocked(hits)
+        sent, blocked = _split_blocked(context, hits)
         lines = []
         for event in hits[:6]:
             delta = _delta_ms(context, event)
             when = f", {delta} ms despues del acceso a la clave" if delta is not None else ""
-            state = "BLOQUEADO" if event.data.get("blocked") else "ENVIADO"
             lines.append(
-                f"- [{state}] {_channel_label(event)} hacia "
-                f"{event.data.get('host') or event.data.get('url', '')} "
-                f"({event.data.get('body_size', 0)} bytes{when})"
-            )
+                _egress_line(context, event, blocked_label="BLOQUEADO", extra=when))
         if sent:
             summary = (f"Salieron datos derivados de la clave privada hacia "
-                       f"{_destinations(sent)}. El contenido puede ser opaco, pero su "
+                       f"{_destinations(sent, context)}. El contenido puede ser opaco, pero su "
                        "procedencia esta establecida.")
         else:
             summary = (f"El sitio intento enviar datos derivados de la clave privada hacia "
-                       f"{_destinations(blocked)}; el aislamiento de red lo impidio.")
+                       f"{_destinations(blocked, context)}; el aislamiento de red lo impidio.")
         return RuleResult(
             status=Status.OBSERVED,
             summary=summary,
@@ -221,15 +274,15 @@ def password_transmitted(context: AuditContext, meta) -> RuleResult:
     hits = context.any_egress(Tag.KEY_PASSWORD)
     if hits:
         direct = context.direct_egress(Tag.KEY_PASSWORD)
-        sent, blocked = _split_blocked(hits)
+        sent, blocked = _split_blocked(context, hits)
         nature = ("en claro o en una codificacion reversible" if direct
                   else "de forma derivada (transformada)")
         if sent:
             summary = (f"La contrasena de la clave privada salio del navegador hacia "
-                       f"{_destinations(sent)}.")
+                       f"{_destinations(sent, context)}.")
         else:
             summary = (f"El sitio intento enviar la contrasena hacia "
-                       f"{_destinations(blocked)}; el aislamiento de red lo impidio.")
+                       f"{_destinations(blocked, context)}; el aislamiento de red lo impidio.")
         return RuleResult(
             status=Status.OBSERVED,
             summary=summary,
@@ -428,9 +481,7 @@ def unclassified_binary_egress(context: AuditContext, meta) -> RuleResult:
         for event in candidates[:6]:
             delta = _delta_ms(context, event)
             when = f"{delta} ms despues del acceso a la clave" if delta is not None else "instante no comparable"
-            lines.append(f"- {_channel_label(event)} hacia "
-                         f"{event.data.get('host') or event.data.get('url', '')}: "
-                         f"{event.data.get('body_size', 0)} bytes, {when}")
+            lines.append(_egress_line(context, event, extra=f", {when}"))
         return RuleResult(
             status=Status.OBSERVED,
             summary=(f"{len(candidates)} salidas binarias sin clasificar ocurrieron tras el "
@@ -498,32 +549,55 @@ def potential_key_to_network_path(context: AuditContext, meta) -> RuleResult:
             "No se ejecuto el analisis estatico.",
             "Ejecute la auditoria en nivel 2 o superior para analizar el codigo cargado.",
         )
-    paths = _static_private_paths(context, ("network", "navigation", "dom", "worker"))
+    channels = ("network", "navigation", "dom", "worker")
+    paths = _static_private_paths(context, channels)
+    unclassified = _static_unclassified_paths(context, channels)
+
+    observed = bool(context.any_egress(Tag.KEY_FILE, Tag.PRIVATE_KEY, Tag.KEY_PASSWORD))
+    execution_note = ("\n\nAdemas, en esta ejecucion se observo salida de material sensible: "
+                      "vease FS-KEY-001, FS-KEY-002 o FS-PWD-001." if observed else
+                      "\n\nNinguna de estas rutas se ejecuto durante la sesion. Que el codigo "
+                      "pueda hacerlo no prueba que lo haga.")
+
     if paths:
-        lines = []
-        for path in paths[:8]:
-            chain = " -> ".join(path.call_chain) if path.call_chain else "(cadena no reconstruida)"
-            transforms = " -> ".join(path.transforms) if path.transforms else "sin transformacion"
-            lines.append(
-                f"- {path.file_label}:{path.sink_line} [{path.confidence.value}]\n"
-                f"    source:    {path.source.name} ({path.source.snippet})\n"
-                f"    transform: {transforms}\n"
-                f"    sink:      {path.sink_name} ({path.sink_snippet})\n"
-                f"    llamadas:  {chain}"
-            )
-        observed = bool(context.any_egress(Tag.KEY_FILE, Tag.PRIVATE_KEY, Tag.KEY_PASSWORD))
-        note = ("\n\nAdemas, en esta ejecucion se observo salida de material sensible: "
-                "vease FS-KEY-001, FS-KEY-002 o FS-PWD-001." if observed else
-                "\n\nNinguna de estas rutas se ejecuto durante la sesion. Que el codigo pueda "
-                "hacerlo no prueba que lo haga.")
+        detail = _describe_paths(paths)
+        if unclassified:
+            detail += (f"\n\nHay ademas {len(unclassified)} rutas de material que entro por una "
+                       "fuente de archivo o cripto sin que el codigo permita tipificarlo. "
+                       "Se detallan en el expediente.")
         return RuleResult(
             status=Status.POTENTIAL,
             summary=(f"El codigo cargado contiene {len(paths)} rutas capaces de llevar material "
                      "sensible hasta un canal de salida."),
-            detail="\n".join(lines) + note,
+            detail=detail + execution_note,
             evidence=[context.code_evidence(p, "ruta source-to-sink") for p in paths[:12]],
             confidence=context.static.best_confidence(paths),
             severity=Severity.HIGH,
+        )
+
+    if unclassified:
+        # Lo unico que se puede afirmar: material de archivo o de cripto llega a
+        # un canal de salida. Si esos bytes son el .key, es la exfiltracion; si
+        # son el documento a firmar, es el envio legitimo. El codigo no lo dice,
+        # y el hallazgo tampoco debe decirlo.
+        return RuleResult(
+            status=Status.POTENTIAL,
+            summary=(f"El codigo cargado contiene {len(unclassified)} rutas que llevan material "
+                     "de archivo o de criptografia hasta un canal de salida, sin que pueda "
+                     "determinarse de que material se trata."),
+            detail=_describe_paths(unclassified) + (
+                "\n\nNo se afirma que lo que viaja por estas rutas sea la clave privada: el "
+                "codigo no identifica el contenido. Tampoco puede descartarse. Es la forma del "
+                "patron de exfiltracion habitual (seleccion de archivo -> lectura -> "
+                "codificacion -> envio), y es tambien la forma del envio legitimo del documento "
+                "a firmar.\n\nPara resolverlo: ejecute la prueba de firma sin conexion "
+                "(nivel 3) y compare el destino de cada ruta con el inventario de peticiones "
+                "del expediente. Si el destino es un tercero, vease FS-NET-001."
+            ) + execution_note,
+            evidence=[context.code_evidence(p, "ruta de material sin clasificar")
+                      for p in unclassified[:12]],
+            confidence=context.static.best_confidence(unclassified),
+            severity=Severity.MEDIUM,
         )
     if not context.static.ast_available:
         return RuleResult.inconclusive(

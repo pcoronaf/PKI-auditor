@@ -155,12 +155,45 @@ class PrivacyPolicy:
         return cls(redact_filenames=True, redact_personal_ids=True,
                    publish_global_digests=False)
 
+    @classmethod
+    def for_operator_material(cls) -> "PrivacyPolicy":
+        """Politica para material aportado por el operador que no es el de produccion.
+
+        Una credencial de prueba propia, o una que el operador introduce a mano,
+        sigue siendo *suya*: si la genero con las herramientas del SAT, el nombre
+        del archivo lleva su RFC. Se redactan nombres e identificadores fiscales,
+        pero se conservan los digests globales, que en modo de prueba son lo que
+        permite comparar expedientes entre sesiones.
+        """
+        return cls(redact_filenames=True, redact_personal_ids=True,
+                   publish_global_digests=True)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "redact_filenames": self.redact_filenames,
             "redact_personal_ids": self.redact_personal_ids,
             "publish_global_digests": self.publish_global_digests,
         }
+
+
+#: Riesgos residuales de usar una e.firma real. Unica fuente de esta redaccion:
+#: la consume el asistente de configuracion, la confirmacion de la CLI y el
+#: reporte, para que el operador lea exactamente lo mismo en los tres sitios.
+REAL_CREDENTIAL_WARNINGS: tuple[str, ...] = (
+    "FirmaScope observa, no bloquea: si el sitio transmite su clave, el hallazgo "
+    "llegara despues de que haya salido.",
+    "Si la auditoria reporta FS-KEY-001, FS-KEY-002 o FS-PWD-001 con la salida marcada "
+    "como ENVIADO, asuma la credencial como comprometida y revoque la e.firma.",
+    "El expediente no guarda su clave ni su contrasena, y redacta nombres de archivo e "
+    "identificadores fiscales. Aun asi, no comparta el expediente sin revisarlo.",
+)
+
+#: Aviso adicional cuando se va a usar la credencial real sin aislar la red.
+NO_ISOLATION_WARNING = (
+    "Sin aislamiento de red, la clave se usara con el sitio conectado. Considere la "
+    "prueba por etapas: la firma ocurre con la red cortada, que es la unica forma de "
+    "limitar la exposicion durante la prueba."
+)
 
 
 def normalize_url(url: str) -> str:
@@ -280,6 +313,12 @@ class AuditConfig:
             self.proxy.enabled = self.proxy.enabled or False
         if self.credential_mode.is_real:
             self._harden_for_real_credentials()
+        elif self.credential_mode is not CredentialMode.SYNTHETIC:
+            # Solo la credencial sintetica tiene metadatos inocuos: la genera
+            # FirmaScope y no describe a nadie. En cuanto el material es del
+            # operador, el expediente deja de poder publicar su nombre de
+            # archivo, aunque la credencial sea "de prueba".
+            self.privacy = PrivacyPolicy.for_operator_material()
 
     def _harden_for_real_credentials(self) -> None:
         """Endurecimiento no negociable del modo ``real``.
@@ -329,21 +368,9 @@ class AuditConfig:
         """
         if not self.credential_mode.is_real:
             return []
-        warnings = [
-            "FirmaScope observa, no bloquea: si el sitio transmite su clave, el hallazgo "
-            "llegara despues de que haya salido.",
-            "Si la auditoria reporta FS-KEY-001, FS-KEY-002 o FS-PWD-001, asuma la "
-            "credencial como comprometida y revoque la e.firma.",
-            "El expediente no guarda su clave ni su contrasena, y redacta nombres de "
-            "archivo e identificadores fiscales. Aun asi, no comparta el expediente sin "
-            "revisarlo.",
-        ]
+        warnings = list(REAL_CREDENTIAL_WARNINGS)
         if self.isolation.mode is IsolationMode.NONE:
-            warnings.append(
-                "Sin aislamiento de red, la clave se usara con el sitio conectado. "
-                "Considere la prueba por etapas: la firma ocurre con la red cortada, "
-                "que es la unica forma de limitar la exposicion durante la prueba."
-            )
+            warnings.append(NO_ISOLATION_WARNING)
         return warnings
 
     # -- capacidades derivadas del nivel --------------------------------

@@ -384,6 +384,12 @@ class EvidenceStore:
 
     # -- integridad -----------------------------------------------------
     def verify_chain(self) -> tuple[bool, int | None]:
+        """Verifica la cadena. Devuelve ``(ok, seq_del_primer_registro_roto)``.
+
+        El numero devuelto es el ``seq`` del evento en el expediente, no el
+        indice en la lista: es lo que el operador puede buscar en
+        ``timeline.json`` para ver *que* registro fue alterado.
+        """
         rows = self.db.execute("SELECT * FROM events ORDER BY seq").fetchall()
         records = []
         for row in rows:
@@ -391,10 +397,26 @@ class EvidenceStore:
             payload = event.to_dict()
             payload.pop("seq", None)
             records.append((payload, row["prev_hash"], row["hash"]))
-        return chain.verify(records)
+        ok, index = chain.verify(records)
+        if ok or index is None:
+            return ok, None
+        return False, int(rows[index]["seq"])
+
+    def event_at(self, seq: int) -> dict[str, Any] | None:
+        """Devuelve un evento por su ``seq``, para describir una cadena rota."""
+        row = self.db.execute("SELECT * FROM events WHERE seq=?", (seq,)).fetchone()
+        if row is None:
+            return None
+        return {"seq": row["seq"], "id": row["id"], "type": row["type"],
+                "timestamp": row["timestamp"], "sensor": row["sensor"]}
 
     def session_info(self) -> dict[str, Any]:
         row = self.db.execute("SELECT * FROM session WHERE id=?", (self.session_id,)).fetchone()
+        if row is None:
+            # Un expediente verificado desde otra maquina puede estar en un
+            # directorio renombrado. La identidad de la sesion la define el
+            # expediente, no el nombre de la carpeta que lo contiene.
+            row = self.db.execute("SELECT * FROM session ORDER BY started_at LIMIT 1").fetchone()
         if row is None:
             return {}
         info = dict(row)
