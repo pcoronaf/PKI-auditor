@@ -454,16 +454,59 @@
         };
       });
     });
-    // Un Blob construido a partir de material etiquetado hereda la procedencia.
+    /*
+     * Un Blob o un File construido a partir de material etiquetado hereda la
+     * procedencia, y la hereda SIN marcar DERIVED: envolver bytes en un
+     * contenedor no los transforma. Los bytes de la clave siguen ahi, verbatim,
+     * y saldrian reconocibles en el cuerpo de la peticion. Marcarlo derivado
+     * degradaria el patron de subida de .key mas frecuente que existe --
+     * multipart/form-data -- de "clave transmitida" a "dato derivado".
+     */
     var NativeBlob = G.Blob;
     function FSBlob(parts, options) {
       var instance = new NativeBlob(parts || [], options);
       var labels = labelsOf(parts);
-      if (labels.length) { taint(instance, derive(labels)); }
+      if (labels.length) { taint(instance, labels); }
       return instance;
     }
     FSBlob.prototype = NativeBlob.prototype;
     try { G.Blob = FSBlob; } catch (e) { /* ignorado */ }
+
+    if (G.File) {
+      var NativeFile = G.File;
+      function FSFile(parts, name, options) {
+        var instance = new NativeFile(parts || [], name, options);
+        var labels = labelsOf(parts);
+        if (labels.length) { taint(instance, labels); }
+        return instance;
+      }
+      FSFile.prototype = NativeFile.prototype;
+      try { G.File = FSFile; } catch (e) { /* ignorado */ }
+    }
+
+    /*
+     * FormData.append(name, blob, filename) NO guarda el Blob que recibe:
+     * construye un File nuevo con los mismos bytes. El objeto etiquetado se
+     * queda fuera del formulario y la procedencia se pierde justo antes del
+     * envio, que es donde mas falta hace.
+     *
+     * Por eso la etiqueta se fija en el propio FormData: es el objeto que
+     * llega al sumidero, y es el que la inspeccion del cuerpo consulta.
+     */
+    if (G.FormData && G.FormData.prototype) {
+      ['append', 'set'].forEach(function (method) {
+        var original = G.FormData.prototype[method];
+        if (typeof original !== 'function') { return; }
+        G.FormData.prototype[method] = function (name, value) {
+          var labels = [];
+          try {
+            labels = uniq(labelsOf(value).concat(labelsOf(name)));
+          } catch (e) { /* ignorado */ }
+          if (labels.length) { taint(this, labels); }
+          return original.apply(this, arguments);
+        };
+      });
+    }
   });
 
   /* ================================================================ */
@@ -736,6 +779,47 @@
         try { return taint(out, labelsOf(value)); } catch (e) { return out; }
       };
     });
+
+    /*
+     * `String.fromCharCode.apply(null, new Uint8Array(buf))` es el idioma
+     * habitual para pasar de bytes a cadena antes de btoa(). Aqui la
+     * procedencia SI es verificable: el array que llega como argumento es el
+     * objeto etiquetado, no una reconstruccion.
+     *
+     * Lo que no se puede seguir es el bucle que concatena caracter a caracter
+     * (`binary += String.fromCharCode(bytes[i])`): cada llamada recibe un
+     * numero, y un numero no transporta procedencia. Es un limite real del
+     * seguimiento en pagina, no un descuido; cuando ocurre, la salida se
+     * reporta como binario sin clasificar y la ruta estatica sigue estando.
+     */
+    if (G.String && typeof G.String.fromCharCode === 'function') {
+      var nativeFromCharCode = G.String.fromCharCode;
+      G.String.fromCharCode = function () {
+        var out = nativeFromCharCode.apply(G.String, arguments);
+        try {
+          if (arguments.length > 1) {
+            var labels = labelsOf(arguments.length ? arguments : null);
+            if (labels.length) { return taint(out, labels); }
+          }
+        } catch (e) { /* ignorado */ }
+        return out;
+      };
+    }
+    if (G.Array && typeof G.Array.from === 'function') {
+      var nativeArrayFrom = G.Array.from;
+      G.Array.from = function (source) {
+        var out = nativeArrayFrom.apply(G.Array, arguments);
+        try { return taint(out, labelsOf(source)); } catch (e) { return out; }
+      };
+    }
+    if (G.Array && G.Array.prototype) {
+      wrap(G.Array.prototype, 'join', function (original) {
+        return function () {
+          var out = original.apply(this, arguments);
+          try { return taint(out, labelsOf(this)); } catch (e) { return out; }
+        };
+      });
+    }
   });
 
   /* ================================================================ */

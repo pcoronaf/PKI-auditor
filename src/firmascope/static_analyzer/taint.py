@@ -430,6 +430,14 @@ class ScriptAnalysis:
                 taint = self._taint_of(value, fn) if value is not None else EMPTY
                 if taint.empty:
                     taint = self._name_seed(name, target)
+                elif taint.unclassified:
+                    # El valor entro por una fuente reconocida pero sin tipificar.
+                    # El nombre de la variable es precisamente la pista que falta:
+                    # `keyBytes` dice que esos bytes son el .key. Refina la
+                    # etiqueta sin inventarse el origen, que sigue siendo la API.
+                    seed = self._name_seed(name, target)
+                    if not seed.empty:
+                        taint = taint.with_labels(seed.labels)
                 self._assign(fn, name, taint)
         elif kind in ("assignment_expression", "augmented_assignment_expression"):
             self._visit_assignment(node, fn)
@@ -494,6 +502,20 @@ class ScriptAnalysis:
                 )
             if not incoming.empty:
                 self._assign(fn, parser.text(object_node, self.source), incoming)
+
+        # 1b. Mutadores de contenedor: `form.append(...)` contamina `form`.
+        #     Sin esto, la ruta se corta exactamente donde el material entra en
+        #     el objeto que se envia, y el patron de subida de .key por
+        #     multipart no produce ninguna ruta.
+        if (member_name in catalog.CONTAINER_MUTATORS and object_node is not None
+                and object_node.type == "identifier"
+                and catalog.match_pattern(catalog.SINK_CALLS, member_name, object_text) is None):
+            incoming = EMPTY
+            for arg in args:
+                incoming = incoming.merge(self._taint_of(arg, fn))
+            if not incoming.empty:
+                self._assign(fn, parser.text(object_node, self.source),
+                             incoming.through(f"{member_name}()", derived=False))
 
         # 2. Continuaciones de promesa: `resolve(x)` equivale a un retorno.
         if callee.type == "identifier" and self._is_continuation(fn, callee_text):
@@ -659,7 +681,8 @@ class ScriptAnalysis:
             if result.empty:
                 return EMPTY
             if name in catalog.TRANSFORM_CONSTRUCTORS:
-                return result.through(f"new {name}", derived=name not in ("Uint8Array", "DataView"))
+                return result.through(f"new {name}",
+                                      derived=name not in catalog.CONTAINERS)
             return result
 
         if kind in ("object", "array", "arguments", "template_string", "template_substitution",

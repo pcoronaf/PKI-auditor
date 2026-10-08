@@ -85,6 +85,20 @@ TRANSFORMS = frozenset(
 #: Constructores que envuelven datos conservando la procedencia.
 TRANSFORM_CONSTRUCTORS = frozenset({"Blob", "File", "FormData", "URLSearchParams", "Uint8Array", "DataView"})
 
+#: Contenedores que *no transforman* los bytes: envolver no es derivar. Los
+#: bytes de la clave siguen presentes verbatim y saldrian reconocibles en el
+#: cuerpo de la peticion, asi que la ruta es transmision directa. Tratarlos como
+#: derivados degradaria el patron de subida de .key mas comun que existe
+#: (multipart/form-data) de "clave transmitida" a "dato derivado".
+CONTAINERS = frozenset({"Blob", "File", "FormData", "URLSearchParams", "Uint8Array", "DataView"})
+
+#: Metodos que meten un valor dentro de un contenedor. La procedencia pasa al
+#: *receptor*: tras `form.append('k', keyBytes)`, es `form` lo que lleva la
+#: clave, y `form` es lo que llega al sumidero.
+CONTAINER_MUTATORS = frozenset(
+    {"append", "set", "add", "push", "unshift", "write", "enqueue", "put"}
+)
+
 
 # ----------------------------------------------------------------------
 # SINKS
@@ -158,6 +172,19 @@ NAME_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 PUBLIC_KEY_PATTERN = re.compile(r"public[_-]?key|pubkey|api[_-]?key|key[_-]?code|keyboard|keydown|keyup|keypress",
                                 re.I)
 
+#: ``document`` casi siempre es el DOM, no el documento a firmar. Sin esta
+#: excepcion, cualquier `document.getElementById(...)` etiqueta la expresion
+#: como DOCUMENT y contamina los hallazgos con una procedencia inventada.
+DOM_DOCUMENT_PATTERN = re.compile(
+    r"\bdocument\s*\.\s*(?:getElementById|getElementsBy\w+|querySelector(?:All)?|"
+    r"createElement|createTextNode|body|head|forms|cookie|documentElement|"
+    r"activeElement|addEventListener|write)\b", re.I)
+
+#: Senales de que "document" si se refiere al documento a firmar.
+REAL_DOCUMENT_PATTERN = re.compile(
+    r"documento|cadena[_-]?original|to[_-]?sign|sign(?:ed)?[_-]?document|"
+    r"document[_-]?(?:text|data|bytes|content|hash|payload)|\bxml\b|\bpdf\b", re.I)
+
 
 def infer_labels(text: str) -> set[str]:
     """Deduce etiquetas de procedencia a partir del texto de una expresion.
@@ -174,6 +201,10 @@ def infer_labels(text: str) -> set[str]:
     for pattern, label in NAME_PATTERNS:
         if pattern.search(text):
             labels.add(label)
+    if (Tag.DOCUMENT.value in labels
+            and DOM_DOCUMENT_PATTERN.search(text)
+            and not REAL_DOCUMENT_PATTERN.search(text)):
+        labels.discard(Tag.DOCUMENT.value)
     return labels
 
 
