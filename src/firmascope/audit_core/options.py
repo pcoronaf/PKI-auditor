@@ -140,15 +140,19 @@ AUDIT_OPTIONS: tuple[Option, ...] = (
         label="Nivel de auditoria",
         kind=OptionKind.CHOICE,
         default="4",
+        help="Que se observa. El nivel 4 incluye los anteriores.",
+        # En orden natural, no con el valor por defecto primero: una interfaz
+        # que numera las alternativas haria que teclear "2" seleccionara otro
+        # nivel que el 2. El valor por defecto se senala, no se reordena.
         choices=(
-            Choice("4", "Auditoria completa",
-                   "Instrumentacion, red, analisis de codigo y prueba sin conexion."),
             Choice("1", "Solo red",
                    "Equivale a DevTools Network, pero con registro reproducible."),
             Choice("2", "Analisis de codigo",
                    "Que podria hacer el codigo aunque no ocurra en esta ejecucion."),
             Choice("3", "Prueba de firma sin conexion",
                    "Comprueba si la firma se completa con la red aislada."),
+            Choice("4", "Auditoria completa",
+                   "Instrumentacion, red, analisis de codigo y prueba sin conexion."),
         ),
     ),
     Option(

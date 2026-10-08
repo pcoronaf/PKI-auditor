@@ -106,12 +106,15 @@ def _ask_choice(option: Option, current: Any) -> Any:
         raw = input(f"\n  Eleccion [{default_index}]: ").strip()
         if not raw:
             return option.choices[default_index - 1].value
-        if raw.isdigit() and 1 <= int(raw) <= len(option.choices):
-            return option.choices[int(raw) - 1].value
         lowered = raw.lower()
+        # El valor exacto gana sobre la posicion: cuando los valores son
+        # digitos (el nivel de auditoria), teclear "2" debe elegir el 2 y no
+        # la segunda alternativa de la lista.
         for choice in option.choices:
             if choice.value == lowered:
                 return choice.value
+        if raw.isdigit() and 1 <= int(raw) <= len(option.choices):
+            return option.choices[int(raw) - 1].value
         print("  Opcion no valida.")
 
 
