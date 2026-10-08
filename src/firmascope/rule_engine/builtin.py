@@ -79,6 +79,21 @@ def _channel_label(event: Event) -> str:
     return kinds.get(event.type, event.type.value)
 
 
+def _split_blocked(events: Sequence[Event]) -> tuple[list[Event], list[Event]]:
+    """Separa las salidas que de verdad ocurrieron de los intentos bloqueados.
+
+    Con el aislamiento activo, FirmaScope aborta la peticion antes de que salga.
+    La distincion es la diferencia entre "su clave esta fuera" y "el sitio lo
+    intento y no pudo": con una credencial real, lo primero obliga a revocar y
+    lo segundo no.
+    """
+    sent: list[Event] = []
+    blocked: list[Event] = []
+    for event in events:
+        (blocked if event.data.get("blocked") else sent).append(event)
+    return sent, blocked
+
+
 def _static_private_paths(context: AuditContext, channels: Sequence[str] = ()) -> list[Any]:
     if context.static is None:
         return []
@@ -96,18 +111,32 @@ def _static_private_paths(context: AuditContext, channels: Sequence[str] = ()) -
 def key_file_transmitted(context: AuditContext, meta) -> RuleResult:
     hits = context.direct_egress(Tag.KEY_FILE, Tag.PRIVATE_KEY)
     if hits:
+        sent, blocked = _split_blocked(hits)
         detail_lines = []
         for event in hits[:6]:
             matches = context.canary_matches(event)
             encodings = ", ".join(sorted({m.get("encoding", "") for m in matches})) or "etiquetado por instrumentacion"
+            state = "BLOQUEADO por el aislamiento" if event.data.get("blocked") else "ENVIADO"
             detail_lines.append(
-                f"- {_channel_label(event)} hacia {event.data.get('host') or event.data.get('url', '')} "
+                f"- [{state}] {_channel_label(event)} hacia "
+                f"{event.data.get('host') or event.data.get('url', '')} "
                 f"({event.data.get('body_size', 0)} bytes; evidencia: {encodings})"
             )
+        if sent:
+            summary = (f"El material de la clave privada salio del navegador hacia "
+                       f"{_destinations(sent)}.")
+            detail_head = "Salidas observadas:"
+        else:
+            summary = (f"El sitio intento enviar el material de la clave privada hacia "
+                       f"{_destinations(blocked)}; el aislamiento de red lo impidio.")
+            detail_head = (
+                "Ninguna de estas salidas llego a producirse: FirmaScope las aborto. "
+                "El intento es, sin embargo, evidencia de primer orden sobre lo que el "
+                "sitio hace con la clave cuando tiene red.")
         return RuleResult(
             status=Status.OBSERVED,
-            summary=f"El material de la clave privada salio del navegador hacia {_destinations(hits)}.",
-            detail="Salidas observadas:\n" + "\n".join(detail_lines),
+            summary=summary,
+            detail=detail_head + "\n" + "\n".join(detail_lines),
             evidence=_evidence(context, hits, "transmision directa de material de clave"),
             confidence=Confidence.HIGH,
             severity=Severity.CRITICAL,
@@ -128,18 +157,27 @@ def key_file_transmitted(context: AuditContext, meta) -> RuleResult:
 def key_derived_transmitted(context: AuditContext, meta) -> RuleResult:
     hits = context.derived_egress(Tag.KEY_FILE, Tag.PRIVATE_KEY)
     if hits:
+        sent, blocked = _split_blocked(hits)
         lines = []
         for event in hits[:6]:
             delta = _delta_ms(context, event)
             when = f", {delta} ms despues del acceso a la clave" if delta is not None else ""
+            state = "BLOQUEADO" if event.data.get("blocked") else "ENVIADO"
             lines.append(
-                f"- {_channel_label(event)} hacia {event.data.get('host') or event.data.get('url', '')} "
+                f"- [{state}] {_channel_label(event)} hacia "
+                f"{event.data.get('host') or event.data.get('url', '')} "
                 f"({event.data.get('body_size', 0)} bytes{when})"
             )
+        if sent:
+            summary = (f"Salieron datos derivados de la clave privada hacia "
+                       f"{_destinations(sent)}. El contenido puede ser opaco, pero su "
+                       "procedencia esta establecida.")
+        else:
+            summary = (f"El sitio intento enviar datos derivados de la clave privada hacia "
+                       f"{_destinations(blocked)}; el aislamiento de red lo impidio.")
         return RuleResult(
             status=Status.OBSERVED,
-            summary=(f"Salieron datos derivados de la clave privada hacia {_destinations(hits)}. "
-                     "El contenido puede ser opaco, pero su procedencia esta establecida."),
+            summary=summary,
             detail=("La instrumentacion siguio la procedencia del dato desde el material privado "
                     "hasta el canal de salida. No es necesario interpretar el contenido "
                     "transmitido para afirmar de donde procede.\n\n" + "\n".join(lines)),
@@ -183,11 +221,18 @@ def password_transmitted(context: AuditContext, meta) -> RuleResult:
     hits = context.any_egress(Tag.KEY_PASSWORD)
     if hits:
         direct = context.direct_egress(Tag.KEY_PASSWORD)
+        sent, blocked = _split_blocked(hits)
         nature = ("en claro o en una codificacion reversible" if direct
                   else "de forma derivada (transformada)")
+        if sent:
+            summary = (f"La contrasena de la clave privada salio del navegador hacia "
+                       f"{_destinations(sent)}.")
+        else:
+            summary = (f"El sitio intento enviar la contrasena hacia "
+                       f"{_destinations(blocked)}; el aislamiento de red lo impidio.")
         return RuleResult(
             status=Status.OBSERVED,
-            summary=f"La contrasena de la clave privada salio del navegador hacia {_destinations(hits)}.",
+            summary=summary,
             detail=(f"La transmision se observo {nature}. La contrasena de la e.firma protege la "
                     "clave privada: su envio al servidor implica que el servidor puede usar la "
                     "clave si tambien dispone del .key."),
