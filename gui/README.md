@@ -34,6 +34,17 @@ Con stdio no hay superficie: el proceso lo lanza la interfaz como hijo y sólo
 ella puede escribirle. Es también lo que permite que la contraseña de la clave
 viaje por el canal sin pasar por la red ni por la línea de comandos.
 
+### La excepción: el panel
+
+`firmascope panel` sirve **esta misma interfaz** (`src/firmascope/ui/`, la que
+empaqueta Tauri) en `127.0.0.1`, para usarla en el navegador sin compilar nada.
+Es otro transporte del mismo puente, con el riesgo de un puerto local: lo
+mitigan un código de un solo uso en la URL, un token por sesión en `X-FS-Token`,
+la comprobación de `Host` y de origen y una CSP `'self'`, y el panel avisa del
+riesgo al arrancar y en la página. Las condiciones están en `CLAUDE.md` y en
+`firmascope/gui_bridge/panel.py`; las pruebas de `tests/test_panel.py` hablan
+HTTP con él como lo haría un atacante.
+
 ## Por qué la interfaz no decide nada
 
 Los campos, sus dependencias, las validaciones y los estados de conclusión salen

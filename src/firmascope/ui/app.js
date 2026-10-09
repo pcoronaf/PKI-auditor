@@ -18,10 +18,12 @@
 /* ------------------------------------------------------------------ */
 
 /*
- * En Tauri se habla con el nucleo por `invoke`. Fuera de Tauri, las pruebas
- * inyectan `window.firmascopeTransport` para ejercitar esta misma interfaz en un
- * navegador: es una costura de prueba declarada, no un modo de produccion. Si no
- * hay ninguno de los dos, la interfaz lo dice en lugar de fingir que funciona.
+ * En Tauri se habla con el nucleo por `invoke`. En el panel (`firmascope
+ * panel`) esta misma pagina la sirve el nucleo en 127.0.0.1 y se le habla por
+ * HTTP, con el token que llega en el fragmento de la URL. Las pruebas inyectan
+ * `window.firmascopeTransport` para ejercitar la interfaz en un navegador: es
+ * una costura de prueba declarada, no un modo de produccion. Si no hay ninguno,
+ * la interfaz lo dice en lugar de fingir que funciona.
  */
 function resolveTransport() {
   if (window.firmascopeTransport) {
@@ -37,7 +39,61 @@ function resolveTransport() {
         invoke('pick_file', { title: title, extensions: extensions })
     };
   }
-  return null;
+  return panelTransport();
+}
+
+/*
+ * Transporte del panel. La URL que abre el navegador lleva un codigo de un
+ * solo uso en el fragmento (`#code=...`): el fragmento no se envia al servidor
+ * ni va en el Referer, pero la URL entera si aparece en la lista de procesos
+ * del equipo mientras arranca el navegador. Por eso no es el token: se canjea
+ * una vez por el token de la sesion y deja de valer. El token se guarda en
+ * sessionStorage (de este origen, muere con la pestana) para sobrevivir a una
+ * recarga, y cada orden lo lleva en una cabecera propia, que una pagina de otro
+ * origen no puede anadir sin una comprobacion CORS que el panel nunca concede.
+ *
+ * Sin `shutdown`: cerrar o recargar la pestana no debe abortar una auditoria.
+ * El panel se cierra con Ctrl-C en la terminal, que cierra el expediente.
+ */
+function panelTransport() {
+  if (!/^https?:$/.test(location.protocol)) { return null; }
+  const found = /(?:^#|&)code=([A-Za-z0-9_-]+)/.exec(location.hash);
+  let code = found ? found[1] : null;
+  if (code) { history.replaceState(null, '', location.pathname); }
+  let token = null;
+  try { token = sessionStorage.getItem('firmascope-token'); } catch (err) { token = null; }
+  if (!code && !token) { return null; }
+
+  async function request(path, headers, body) {
+    const res = await fetch(path, {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'omit',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, headers),
+      body: JSON.stringify(body)
+    });
+    let reply = null;
+    try { reply = await res.json(); } catch (err) { reply = null; }
+    if (!reply) { throw new Error('el panel respondio ' + res.status); }
+    if (!reply.ok) { throw new Error(reply.error || 'error del nucleo'); }
+    return reply.result;
+  }
+
+  async function ensureToken() {
+    if (token) { return token; }
+    if (!code) { throw new Error('sin acceso al panel: abra la direccion que imprimio la terminal'); }
+    const once = code;
+    code = null;
+    token = (await request('/api/bootstrap', {}, { code: once })).token;
+    try { sessionStorage.setItem('firmascope-token', token); } catch (err) { /* solo memoria */ }
+    return token;
+  }
+
+  async function post(cmd, args) {
+    const current = await ensureToken();
+    return request('/api/call', { 'X-FS-Token': current }, { cmd: cmd, args: args || {} });
+  }
+  return { hello: () => post('hello'), call: post };
 }
 
 const transport = resolveTransport();
@@ -103,6 +159,12 @@ async function boot() {
       `python ${hello.environment.python}` +
       (hello.proxy_available ? ' · proxy disponible' : ' · sin proxy (nivel 4 degradado)');
     state.warnings = hello.real_credential_warnings || [];
+    // Un aviso del nucleo sobre como se esta ejecutando (el del panel: hay un
+    // puerto abierto). El texto lo pone el nucleo; aqui solo se muestra.
+    if (hello.notice) {
+      $('notice').textContent = hello.notice;
+      $('notice').hidden = false;
+    }
 
     const schema = await call('schema');
     state.schema = schema.options;
@@ -423,6 +485,32 @@ async function start() {
   });
 }
 
+/*
+ * Copiar al portapapeles. `navigator.clipboard` exige un contexto seguro y no
+ * todos los webviews lo ofrecen; el respaldo con una seleccion temporal
+ * funciona en los que no. La ruta y la contrasena se pegan en el selector de
+ * archivos y en el formulario del portal: teclearlas es donde se equivoca uno.
+ */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (err) { /* se intenta el respaldo */ }
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+  area.remove();
+  return ok;
+}
+
 function renderCredential() {
   const card = $('credential-card');
   const info = state.credential || {};
@@ -437,6 +525,17 @@ function renderCredential() {
     const code = document.createElement('code');
     code.textContent = value || '';
     dd.appendChild(code);
+    if (value) {
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'copy';
+      copy.textContent = 'Copiar';
+      copy.addEventListener('click', async () => {
+        const ok = await copyText(String(value));
+        toast(ok ? `${label} copiado` : 'No se pudo copiar; seleccione el texto', !ok);
+      });
+      dd.appendChild(copy);
+    }
     dl.appendChild(dt);
     dl.appendChild(dd);
   });
@@ -568,14 +667,17 @@ async function poll() {
 
 const feedSeen = { count: 0 };
 function addEvent(event) {
-  if (!LIVE_TYPES[event.type]) { return; }
+  // Una salida de material privado se muestra siempre, sea del tipo que sea:
+  // es lo unico de la lista que no puede pasar desapercibido.
+  const privateEgress = Boolean(event.private_egress);
+  if (!LIVE_TYPES[event.type] && !privateEgress) { return; }
   const feed = $('feed');
   const empty = feed.querySelector('.empty');
   if (empty) { empty.remove(); }
 
   const row = document.createElement('div');
   const blocked = Boolean(event.data && event.data.blocked);
-  row.className = 'ev' + (blocked ? ' blocked' : '');
+  row.className = 'ev' + (blocked ? ' blocked' : '') + (privateEgress ? ' private' : '');
 
   const type = document.createElement('span');
   type.className = 't';
@@ -586,7 +688,11 @@ function addEvent(event) {
   const data = event.data || {};
   const where = data.host || data.store || data.reason || data.algorithm || '';
   const size = data.body_size || data.size || '';
-  detail.textContent = [where, size, blocked ? '[BLOQUEADO]' : ''].filter(Boolean).join(' ');
+  const mark = privateEgress
+    ? (blocked ? '[INTENTO BLOQUEADO DE SACAR MATERIAL PRIVADO]' : '[SALIDA DE MATERIAL PRIVADO]')
+    : (blocked ? '[BLOQUEADO]' : '');
+  detail.textContent = [where, size, mark].filter(Boolean).join(' ');
+  if (privateEgress) { row.setAttribute('role', 'alert'); }
 
   const tags = document.createElement('span');
   tags.className = 'g';

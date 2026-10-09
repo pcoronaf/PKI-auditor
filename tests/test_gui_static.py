@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-UI = ROOT / "gui" / "ui"
+UI = ROOT / "src" / "firmascope" / "ui"
 
 if not (UI / "index.html").is_file():  # pragma: no cover
     pytest.skip("la interfaz no esta en el arbol", allow_module_level=True)
@@ -96,8 +96,18 @@ def test_los_tipos_de_campo_del_esquema_estan_todos_soportados():
 
 
 def test_la_interfaz_no_abre_ningun_puerto_ni_pide_a_la_red():
-    """Un puerto o un fetch externo serian superficie que no debe existir."""
-    assert "fetch(" not in JS
+    """Un puerto o un fetch externo serian superficie que no debe existir.
+
+    La unica excepcion es el transporte del panel (ver CLAUDE.md): un solo
+    `fetch`, dentro de `panelTransport`, a rutas relativas del propio origen.
+    """
+    assert JS.count("fetch(") == 1, "solo el transporte del panel puede usar fetch"
+    inicio = JS.index("function panelTransport()")
+    fin = JS.index("\n}\n", inicio)
+    assert inicio < JS.index("fetch(") < fin, "fetch fuera del transporte del panel"
+    rutas = set(re.findall(r"request\('(/[^']*)'", JS))
+    assert rutas == {"/api/call", "/api/bootstrap"}, rutas
+    assert not re.search(r"['\"`]https?://", JS), "la interfaz no habla con otros origenes"
     assert "XMLHttpRequest" not in JS
     assert "WebSocket" not in JS
     assert "localhost" not in JS

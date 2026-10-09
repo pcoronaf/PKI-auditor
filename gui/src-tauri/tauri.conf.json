@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "mx.firmascope.auditor",
   "build": {
-    "frontendDist": "../ui"
+    "frontendDist": "../../src/firmascope/ui"
   },
   "app": {
     "withGlobalTauri": true,

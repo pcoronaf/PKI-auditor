@@ -3,6 +3,7 @@
     firmascope audit [URL]        auditar un sitio (la URL puede darse despues)
     firmascope audit URL --auto   auditar sin operador (credencial sintetica)
     firmascope login URL          iniciar sesion en el portal y guardarla para auditar
+    firmascope panel [URL]        la interfaz grafica en el navegador (abre un puerto local)
     firmascope options            listar las opciones configurables
     firmascope credentials new    generar una credencial sintetica de laboratorio
     firmascope rules              listar el catalogo de reglas
@@ -302,6 +303,10 @@ def _resolve_setup(args: argparse.Namespace) -> SetupResult | None:
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
+    if getattr(args, "panel", False):
+        # Los argumentos indicados precargan el formulario del panel, como
+        # precargan el asistente de texto.
+        return cmd_panel(args)
     setup = _resolve_setup(args)
     if setup is None:
         return 2
@@ -428,6 +433,51 @@ def cmd_login(args: argparse.Namespace) -> int:
     print("No lo copie a ningun repositorio; al terminar, cierre la sesion en el portal")
     print("y borre el fichero.")
     print(f"\nPara auditar con ella:  firmascope audit {url} --session {target}")
+    return 0
+
+
+def cmd_panel(args: argparse.Namespace) -> int:
+    """La interfaz grafica servida en 127.0.0.1, para abrirla en el navegador.
+
+    Es la misma interfaz y el mismo puente que la aplicacion de escritorio; lo
+    que cambia es el transporte, y con el, el riesgo: un puerto local.
+    """
+    import textwrap
+    import webbrowser
+
+    from ..gui_bridge.bridge import Bridge
+    from ..gui_bridge.panel import PANEL_WARNING, PanelServer
+
+    bridge = Bridge(seed=_seed_from_args(args), notice=PANEL_WARNING)
+    try:
+        server = PanelServer(bridge, port=getattr(args, "port", 0) or 0).start()
+    except OSError as exc:
+        print(f"error: no se pudo abrir el panel: {exc}", file=sys.stderr)
+        return 1
+
+    rule = "!" * 78
+    print(rule)
+    for line in textwrap.wrap(PANEL_WARNING, 76):
+        print(f"! {line}")
+    print(rule)
+    print()
+    print(f"Panel: {server.url}")
+    print("La direccion sirve una sola vez: si la abre otro, usted vera 'codigo")
+    print("invalido' y sabra que alguien se adelanto. Cierre el panel y vuelva a abrirlo.")
+    if not getattr(args, "no_browser", False):
+        webbrowser.open(server.url)
+    print("Ctrl-C para cerrar el panel (cierra tambien el expediente en curso).")
+
+    try:
+        server.serve()
+    except KeyboardInterrupt:
+        print("\nCerrando el panel...")
+    finally:
+        if not bridge.closed:
+            bridge.handle({"id": 0, "cmd": "shutdown"})
+        server.stop()
+    if bridge.package is not None:
+        print(f"Expediente: {bridge.package}")
     return 0
 
 
@@ -618,6 +668,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="segundos por etapa en piloto automatico (3)")
     audit.add_argument("--offline-dwell", type=float, default=None,
                        help="segundos en la etapa de firma en piloto automatico (4)")
+    audit.add_argument("--panel", action="store_true",
+                       help="abrir la interfaz grafica en el navegador en lugar del "
+                            "asistente de texto. Abre un puerto local: ver 'panel --help'.")
     audit.add_argument("--no-interactive", action="store_true",
                        help="no preguntar nada: usar los argumentos y los valores por "
                             "defecto del esquema. Para guiones y canalizaciones.")
@@ -634,6 +687,22 @@ def build_parser() -> argparse.ArgumentParser:
     login.add_argument("--no-sandbox", action="store_true",
                        help="desactivar el sandbox de Chromium (ver 'audit --help')")
     login.set_defaults(func=cmd_login)
+
+    panel = sub.add_parser(
+        "panel", help="la interfaz grafica en el navegador (abre un puerto local)",
+        description="Sirve en 127.0.0.1 la misma interfaz que la aplicacion de "
+                    "escritorio, para usarla sin compilarla.",
+        epilog="Riesgo: el panel abre un puerto local, alcanzable por cualquier "
+               "pagina o programa del equipo. Lo protegen un codigo de un solo uso, "
+               "un token y comprobaciones de origen, pero no lo use en un equipo "
+               "compartido. La aplicacion de escritorio no abre ningun puerto.")
+    panel.add_argument("url", nargs="?", default=None,
+                       help="sitio a auditar; puede indicarse despues en la pagina")
+    panel.add_argument("--port", type=int, default=0,
+                       help="puerto local (por defecto, uno libre al azar)")
+    panel.add_argument("--no-browser", action="store_true",
+                       help="no abrir el navegador; solo imprimir la direccion")
+    panel.set_defaults(func=cmd_panel)
 
     creds = sub.add_parser("credentials", help="credenciales sinteticas de laboratorio")
     creds_sub = creds.add_subparsers(dest="action", required=True)

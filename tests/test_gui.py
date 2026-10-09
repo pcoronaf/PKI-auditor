@@ -24,7 +24,7 @@ import pytest
 pytestmark = pytest.mark.e2e
 
 ROOT = Path(__file__).resolve().parents[1]
-UI = ROOT / "gui" / "ui" / "index.html"
+UI = ROOT / "src" / "firmascope" / "ui" / "index.html"
 def _chromium() -> str | None:
     """El Chromium que usaria FirmaScope; None deja elegir a Playwright."""
     from firmascope.audit_core.config import default_chromium_path
@@ -235,3 +235,141 @@ def test_cancelar_cierra_el_expediente_en_lugar_de_perderlo(gui, credential):
     assert report["aborted"] is True
     # La red queda restablecida pase lo que pase.
     assert report["isolation"].get("network_state", "ONLINE") == "ONLINE"
+
+
+def siguiente(page) -> bool:
+    """Pulsa Siguiente cuando la interfaz lo permite. False si ya hay reporte.
+
+    Mientras el nucleo atiende una orden la interfaz desactiva los botones, y
+    la ultima etapa pasa al reporte: pulsar a ciegas falla por una carrera
+    entre la prueba y la interfaz, no por un error de esta.
+    """
+    page.wait_for_function(
+        """() => !document.getElementById('view-report').hidden
+                 || !document.querySelector("[data-action='next']").disabled""",
+        timeout=120000)
+    if page.query_selector("#view-report:not([hidden])"):
+        return False
+    page.click("[data-action='next']")
+    page.wait_for_timeout(800)
+    return True
+
+
+# ----------------------------------------------------------------------
+# Copiar la credencial y resaltar la salida de material privado
+# ----------------------------------------------------------------------
+
+def test_resalta_la_salida_de_la_clave_y_permite_copiar_la_credencial(gui):
+    """demo-key-exfiltration intenta sacar la clave: esa fila no puede pasar
+    desapercibida, aunque el aislamiento la bloquee."""
+    configurar(gui, "http://127.0.0.1:8765/demo-key-exfiltration/")
+    gui.check("[data-option='autopilot'] input")
+    gui.click("#start")
+    gui.wait_for_selector("#view-session:not([hidden])", timeout=60000)
+
+    gui.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    copiado = False
+    for _ in range(12):
+        # La tarjeta de la credencial aparece en la etapa de firma, cuando se
+        # necesita: tres botones, para .cer, .key y contrasena.
+        if not copiado and gui.query_selector("#credential-card:not([hidden])"):
+            assert len(gui.query_selector_all("#credential-info .copy")) == 3
+            gui.click("#credential-info .copy >> nth=2")
+            gui.wait_for_function(
+                "() => document.getElementById('toast').textContent.includes('copiado')",
+                timeout=5000)
+            copiado = True
+        if copiado and gui.query_selector(".feed .ev.private"):
+            break
+        if not siguiente(gui):
+            break
+    assert copiado, "no se llego a mostrar la credencial"
+    fila = gui.query_selector(".feed .ev.private")
+    assert fila is not None, "la salida de la clave no se resalto"
+    assert "MATERIAL PRIVADO" in fila.inner_text()
+    assert not gui.errors, f"errores de consola: {gui.errors}"
+
+
+# ----------------------------------------------------------------------
+# El panel: la misma interfaz, servida por `firmascope panel`
+# ----------------------------------------------------------------------
+
+@pytest.fixture
+def panel_process(lab):
+    """`firmascope panel` como proceso aparte, como lo lanzaria el operador."""
+    import signal
+
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-m", "firmascope.cli.main", "panel", "--no-browser"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(ROOT),
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
+    )
+    salida = []
+    url = None
+    for _ in range(40):
+        line = proc.stdout.readline()
+        if not line:
+            break
+        salida.append(line)
+        if line.startswith("Panel: "):
+            url = line.split("Panel: ", 1)[1].strip()
+            break
+    assert url, "el panel no imprimio su direccion:\n" + "".join(salida)
+    proc.salida = salida
+    proc.url = url
+    yield proc
+    if proc.poll() is None:
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_el_panel_avisa_del_riesgo_y_audita_de_principio_a_reporte(panel_process, tmp_path):
+    from playwright.sync_api import sync_playwright
+
+    terminal = "".join(panel_process.salida)
+    assert "AVISO" in terminal and "puerto local" in terminal
+
+    with sync_playwright() as pw:
+        launch = {"headless": True}
+        if _chromium():
+            launch["executable_path"] = _chromium()
+        browser = pw.chromium.launch(**launch)
+        page = browser.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(panel_process.url)
+        page.wait_for_selector("#view-setup:not([hidden])", timeout=20000)
+
+        # El aviso llega del nucleo y se ve en la propia pagina.
+        assert "puerto local" in page.inner_text("#notice")
+        # El codigo no se queda en la barra de direcciones.
+        assert "code=" not in page.url
+
+        # Otra pestana con la misma direccion ya no entra: el codigo era de un uso.
+        intruso = browser.new_page()
+        intruso.goto(panel_process.url)
+        intruso.wait_for_selector("#view-error:not([hidden])", timeout=20000)
+        assert "codigo invalido" in intruso.inner_text("#error-detail")
+        intruso.close()
+
+        page.out = tmp_path
+        configurar(page)
+        page.check("[data-option='autopilot'] input")
+        page.click("#start")
+        page.wait_for_selector("#view-session:not([hidden])", timeout=60000)
+        for _ in range(12):
+            if not siguiente(page):
+                break
+        page.wait_for_selector("#view-report:not([hidden])", timeout=120000)
+        assert "FS-LOCAL-001" in page.inner_text("#report-findings")
+        paquete = Path(page.inner_text("#report-path"))
+        assert (paquete / "report.json").is_file()
+
+        # Recargar no aborta nada ni pierde el acceso: el token sigue en la pestana.
+        page.reload()
+        page.wait_for_selector("#view-setup:not([hidden])", timeout=20000)
+        assert not errors, f"errores de consola: {errors}"
+        browser.close()

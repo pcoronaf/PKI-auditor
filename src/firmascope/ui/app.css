@@ -97,6 +97,16 @@ ol.stages li .net { font-size: 11px; opacity: .8; }
                white-space: nowrap; }
 .feed .ev .g { color: var(--warn); }
 .feed .ev.blocked .d { color: var(--ok); }
+/* Salida de material privado: lo unico de la lista que no puede pasar
+   desapercibido. Si fue bloqueada sigue resaltada: el sitio lo intento. */
+.feed .ev.private { background: var(--bad-bg, rgba(220, 38, 38, 0.18));
+  border-left: 3px solid var(--bad, #dc2626); padding-left: 5px; }
+.feed .ev.private .d, .feed .ev.private .t { color: var(--bad, #dc2626); font-weight: 600; }
+.kv dd .copy { margin-left: 8px; padding: 2px 8px; font-size: 12px; }
+/* Aviso del nucleo sobre como se ejecuta (el panel abre un puerto local). */
+.notice { margin: 0 auto 12px; max-width: 960px; padding: 10px 14px;
+  border: 1px solid var(--warn, #d97706); border-radius: 6px;
+  background: rgba(217, 119, 6, 0.12); color: var(--fg, inherit); }
 .feed .empty { color: var(--muted); font-family: inherit; }
 
 /* Reporte */
