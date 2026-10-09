@@ -251,14 +251,17 @@ class NetworkIsolation:
             url = request.url
         except Exception:  # pragma: no cover
             try:
-                route.continue_()
+                route.fallback()
             except Exception:
                 pass
             return
 
         if not self._should_block(url):
+            # fallback y no continue_: cede al siguiente manejador. Con
+            # continue_ la peticion salia directa y se saltaba la ruta que
+            # instrumenta los workers, que se registro antes que esta.
             try:
-                route.continue_()
+                route.fallback()
             except Exception:  # pragma: no cover - la peticion pudo cancelarse
                 pass
             return

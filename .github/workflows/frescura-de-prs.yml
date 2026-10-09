@@ -1,0 +1,100 @@
+# Avisa en cuanto un PR abierto se queda atras de main o entra en conflicto.
+#
+# Por que existe: dos ramas de este repositorio partieron de un main que ya no
+# era el actual y construyeron, en paralelo, implementaciones distintas de las
+# mismas piezas. Nadie lo supo hasta intentar fusionar, semanas despues, y para
+# entonces cada una arreglaba fallos que la otra todavia tenia. Este flujo hace
+# visible la divergencia el mismo dia en que empieza.
+#
+# No toca las ramas de nadie: etiqueta y comenta. Actualizar es una decision de
+# quien lleva el PR (boton "Update branch", o `git merge origin/main`).
+name: Frescura de PRs
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  revisar:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const MARCA = '<!-- firmascope:frescura -->';
+            const ATRAS = 'desactualizado';
+            const CONFLICTO = 'conflicto con main';
+            const { owner, repo } = context.repo;
+
+            for (const [name, color, description] of [
+              [ATRAS, 'fbca04', 'El PR no contiene los ultimos cambios de main'],
+              [CONFLICTO, 'd93f0b', 'El PR no se puede fusionar con main sin resolver conflictos'],
+            ]) {
+              try { await github.rest.issues.createLabel({ owner, repo, name, color, description }); }
+              catch (e) { if (e.status !== 422) throw e; }   // ya existe
+            }
+
+            const prs = await github.paginate(github.rest.pulls.list,
+              { owner, repo, state: 'open', per_page: 100 });
+
+            for (const pr of prs) {
+              // GitHub calcula `mergeable` de forma perezosa: tras un push a
+              // main puede venir null unos segundos.
+              let detalle = null;
+              for (let intento = 0; intento < 6; intento++) {
+                detalle = (await github.rest.pulls.get({ owner, repo, pull_number: pr.number })).data;
+                if (detalle.mergeable !== null) break;
+                await new Promise(r => setTimeout(r, 5000));
+              }
+              const cmp = (await github.rest.repos.compareCommitsWithBasehead({
+                owner, repo, basehead: `${detalle.base.sha}...${detalle.head.sha}`,
+              })).data;
+              const atras = cmp.behind_by;
+              const enConflicto = detalle.mergeable === false;
+              const etiquetas = new Set(detalle.labels.map(l => l.name));
+
+              const poner = async (nombre) => {
+                if (!etiquetas.has(nombre)) {
+                  await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: [nombre] });
+                }
+              };
+              const quitar = async (nombre) => {
+                if (etiquetas.has(nombre)) {
+                  try { await github.rest.issues.removeLabel({ owner, repo, issue_number: pr.number, name: nombre }); }
+                  catch (e) { if (e.status !== 404) throw e; }
+                }
+              };
+
+              core.info(`#${pr.number}: ${atras} commits atras, conflicto=${enConflicto}`);
+
+              if (enConflicto) {
+                await poner(CONFLICTO);
+                await quitar(ATRAS);
+                const comentarios = await github.paginate(github.rest.issues.listComments,
+                  { owner, repo, issue_number: pr.number, per_page: 100 });
+                if (!comentarios.some(c => (c.body || '').includes(MARCA))) {
+                  await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body:
+                    `${MARCA}\n**Este PR entra en conflicto con \`main\`** ` +
+                    `(${atras} commits por detras).\n\n` +
+                    'Conviene resolverlo cuanto antes: cuanto mas tarde, mas probable es que ' +
+                    '`main` y esta rama hayan resuelto lo mismo de formas distintas.\n\n' +
+                    '```bash\ngit fetch origin main\ngit merge origin/main   # resolver, probar\n' +
+                    'PYTHONPATH=src python3 -m pytest tests/ -q\n```\n\n' +
+                    '_Aviso automatico del flujo «Frescura de PRs». No se modifica la rama._' });
+                }
+              } else if (atras > 0) {
+                await poner(ATRAS);
+                await quitar(CONFLICTO);
+              } else {
+                await quitar(ATRAS);
+                await quitar(CONFLICTO);
+              }
+            }

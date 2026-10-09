@@ -216,6 +216,40 @@ def test_la_ca_efimera_se_destruye_al_parar(tmp_path):
 
 
 @requiere_mitmproxy
+def test_el_proxy_no_se_da_por_listo_sin_su_ca(tmp_path, monkeypatch):
+    """mitmproxy genera la CA en su hook `running`, a la vez que empieza a
+    escuchar. Dar el proxy por listo con solo ver el puerto abierto dejaba un
+    hueco en que una conexion TLS no podia interceptarse; en la CI salio como
+    un fallo intermitente de la prueba de la CA efimera."""
+    from pathlib import Path
+
+    from mitmproxy.addons.tlsconfig import TlsConfig
+
+    original = TlsConfig.running
+
+    def running_lento(self):
+        time.sleep(1.0)
+        return original(self)
+
+    monkeypatch.setattr(TlsConfig, "running", running_lento)
+    vault = SecretVault()
+    store = EvidenceStore(tmp_path, SESSION, vault)
+    store.open_session(target="http://127.0.0.1/", config={}, versions={}, note="")
+    config = AuditConfig(target="http://127.0.0.1/", level=4, output_dir=tmp_path,
+                         proxy=ProxyConfig(enabled=True, port=free_port()))
+    runner = ProxyRunner(config, SESSION, store, lambda e: store.add_event(e), vault)
+    try:
+        assert runner.start(), runner.error
+        assert any(Path(str(runner._confdir)).glob("*-ca.pem")), \
+            "start() volvio antes de que existiera la CA"
+    finally:
+        runner.stop()
+        store.close_session()
+        store.close()
+        vault.destroy()
+
+
+@requiere_mitmproxy
 def test_el_resumen_dice_que_sensores_hubo(proxy, lab):
     resumen = proxy.summary()
     assert resumen["running"] is True

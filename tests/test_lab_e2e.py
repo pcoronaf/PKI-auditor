@@ -1,4 +1,4 @@
-"""Pruebas de extremo a extremo contra el laboratorio (TC-001 .. TC-006).
+"""Pruebas de extremo a extremo contra el laboratorio (TC-001 .. TC-011).
 
 Son las unicas pruebas que pueden responder si FirmaScope *funciona*: lanzan un
 Chromium real contra las aplicaciones de laboratorio y comparan los hallazgos
@@ -12,7 +12,9 @@ dice "la clave salio" es correcto solo si el recolector la tiene, y uno que dice
 
 from __future__ import annotations
 
+import base64
 import json
+import urllib.parse
 
 import pytest
 
@@ -255,7 +257,7 @@ def test_el_expediente_es_verificable_y_trae_el_informe(lab, tmp_path, credentia
 # Piloto automatico: la auditoria sin nadie delante
 # ----------------------------------------------------------------------
 
-def run_autopilot(app: str, output_dir, *, isolation: str = "full"):
+def run_autopilot(app: str, output_dir, *, isolation: str = "full", session_state=None):
     """Audita sin operador, como `firmascope audit URL --auto --headless`."""
     from firmascope.browser_controller.autopilot import Autopilot
 
@@ -267,6 +269,7 @@ def run_autopilot(app: str, output_dir, *, isolation: str = "full"):
         autopilot=True,
         dwell=1.0,
         offline_dwell=3.0,
+        session_state=session_state,
     )
     session = AuditSession(config)
     pilot = None
@@ -316,3 +319,110 @@ def test_el_piloto_se_niega_con_una_credencial_que_no_es_sintetica():
     """Rellenar una e.firma propia sin nadie delante no se permite."""
     with pytest.raises(ValueError):
         AuditConfig(target="https://x.mx", credential_mode="own-test", autopilot=True)
+
+
+# ----------------------------------------------------------------------
+# Laboratorios que llegaron con el PR #2
+# ----------------------------------------------------------------------
+
+def test_tc009_la_clave_en_un_pixel_se_detecta_y_no_llega_al_expediente(lab, tmp_path):
+    """GET sin cuerpo: la clave en la query string de un pixel de seguimiento."""
+    lab.COLLECTED.clear()
+    report, pilot = run_autopilot("demo-side-channels", tmp_path, isolation="none")
+
+    assert pilot.signed
+    assert any("pixel" in c["path"] for c in lab.COLLECTED), "el pixel no salio"
+    assert status(report, "FS-KEY-001") == "OBSERVED"
+    assert status(report, "FS-PWD-001") == "OBSERVED"
+
+    # La clave salio, pero no puede quedar escrita en el expediente.
+    cred_dir = tmp_path / "credenciales"
+    key_der = next(cred_dir.glob("*.key")).read_bytes()
+    b64 = base64.b64encode(key_der).decode()
+    crudo = b"".join(p.read_bytes() for p in (tmp_path / report["session"]).rglob("*")
+                     if p.is_file())
+    for forma in (b64, urllib.parse.quote(b64, safe=""),
+                  urllib.parse.quote(b64, safe="")[200:260]):
+        assert forma.encode() not in crudo
+
+
+def test_tc010_un_worker_instrumentado_sigue_funcionando(lab, tmp_path):
+    """La instrumentacion no puede romper el sitio que audita."""
+    lab.COLLECTED.clear()
+    report, pilot = run_autopilot("demo-worker", tmp_path, isolation="none")
+
+    assert pilot.signed
+    assert [c for c in lab.COLLECTED if c["path"] == "/collect/worker"], \
+        "el worker no llego a ejecutarse: la instrumentacion lo rompio"
+    assert status(report, "FS-KEY-001") == "OBSERVED"
+
+
+# ----------------------------------------------------------------------
+# Portales con inicio de sesion (portado del PR #2)
+# ----------------------------------------------------------------------
+
+def capture_lab_session(path):
+    """`firmascope login` sobre demo-login, con el operador sustituido por codigo."""
+    from firmascope.browser_controller.session import capture_session
+    from firmascope.labs import server as lab_server
+
+    def iniciar_sesion(page):
+        page.fill("#username", lab_server.LAB_LOGIN_USER)
+        page.fill("#account-password", lab_server.LAB_LOGIN_PASSWORD)
+        page.click("#login")
+        # La aplicacion guarda su token de acceso en localStorage al cargar;
+        # la sesion se guarda despues, como haria quien espera a ver el portal.
+        page.wait_for_function("localStorage.getItem('access_token') !== null",
+                               timeout=15000)
+
+    return capture_session("http://127.0.0.1:8765/demo-login/", path, iniciar_sesion,
+                           headless=True)
+
+
+def test_tc011_auditoria_dentro_de_una_sesion_iniciada(lab, tmp_path):
+    """La auditoria corre dentro de la sesion, y la sesion no llega al expediente.
+
+    La verdad conocida es doble: el portal registro pings autenticados (la
+    auditoria vio el formulario real, no la pagina de acceso), y ninguna forma
+    de la cookie ni del token aparece en ningun fichero del expediente, aunque
+    la aplicacion los envia en la cabecera Cookie, en Authorization y en la URL.
+    """
+    from firmascope.browser_controller.session import load_session_state
+
+    sesion = tmp_path / "sesion.json"
+    resumen = capture_lab_session(sesion)
+    assert resumen["cookies"] >= 1
+    estado = load_session_state(sesion)
+    cookie = next(c["value"] for c in estado["cookies"]
+                  if c["name"] == lab.LAB_SESSION_COOKIE)
+    token = lab.LAB_SESSIONS[cookie]
+
+    lab.COLLECTED.clear()
+    lab.LOGIN_PINGS.clear()
+    report, pilot = run_autopilot("demo-login", tmp_path / "audits", session_state=sesion)
+
+    assert pilot.signed, f"el piloto no llego al formulario: {pilot.notes}"
+    assert token in lab.LOGIN_PINGS, "la auditoria no corrio dentro de la sesion"
+    assert not lab.COLLECTED
+    for regla in ("FS-KEY-001", "FS-KEY-002", "FS-PWD-001"):
+        assert status(report, regla) == "NOT_OBSERVED", regla
+    assert status(report, "FS-LOCAL-001") == "CONFIRMED"
+
+    expediente = tmp_path / "audits" / report["session"]
+    crudo = b"".join(p.read_bytes() for p in expediente.rglob("*") if p.is_file())
+    for valor in (cookie, token):
+        for forma in (valor, urllib.parse.quote(valor, safe=""),
+                      base64.b64encode(valor.encode()).decode()):
+            assert forma.encode() not in crudo, f"la sesion llego al expediente: {forma[:8]}..."
+    assert str(sesion).encode() not in crudo, "el expediente revela donde esta la sesion"
+    manifest = json.loads((expediente / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["audit_configuration"]["authenticated_session"] is True
+
+
+def test_sin_sesion_el_portal_no_muestra_el_formulario(lab, tmp_path):
+    """El control: sin --session el piloto se queda en la pagina de acceso."""
+    lab.LOGIN_PINGS.clear()
+    report, pilot = run_autopilot("demo-login", tmp_path, isolation="none")
+    assert not pilot.signed
+    assert not lab.LOGIN_PINGS
+    assert status(report, "FS-LOCAL-001") != "CONFIRMED"

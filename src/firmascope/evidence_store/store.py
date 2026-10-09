@@ -247,6 +247,20 @@ class EvidenceStore:
 
     # -- requests -------------------------------------------------------
     def add_request(self, record: RequestRecord) -> RequestRecord:
+        """Registra una peticion, redactada como cualquier evento.
+
+        Las peticiones no pasaban por la redaccion: una clave en la query
+        string de un pixel quedaba escrita tal cual en ``session.sqlite``. La
+        URL, la de redireccion y las cabeceras (``Referer`` repite la URL) se
+        limpian aqui, y la ultima barrera comprueba la fila entera.
+        """
+        clean = redact({"url": record.url, "redirect_from": record.redirect_from,
+                        "headers": record.headers}, self.vault, self.privacy)
+        record.url = str(clean.get("url") or "")
+        record.redirect_from = str(clean.get("redirect_from") or "")
+        record.headers = dict(clean.get("headers") or {})
+        assert_no_secrets(json.dumps([record.url, record.redirect_from, record.headers]),
+                          self.vault)
         self.db.execute(
             "INSERT OR REPLACE INTO requests (id,session,timestamp,method,url,host,registrable,third_party,"
             "resource_type,initiator,stack_json,headers_json,body_size,body_digest,body_ref,tags_json,status,"
@@ -287,6 +301,11 @@ class EvidenceStore:
 
     # -- scripts --------------------------------------------------------
     def add_script(self, record: ScriptRecord, body: bytes | None = None) -> ScriptRecord:
+        if body is not None and self.vault is not None:
+            # ``record.sha256`` sigue identificando el script tal como lo sirvio
+            # el sitio; el fichero puede diferir si llevaba la sesion del
+            # operador incrustada, que no debe llegar a disco.
+            body = self.vault.mask_protected(body)
         if body is not None:
             name = f"{record.sha256[:16]}.js"
             path = self.root / "scripts" / name
@@ -340,6 +359,8 @@ class EvidenceStore:
 
     # -- artefactos -----------------------------------------------------
     def add_evidence(self, kind: str, name: str, payload: bytes, subdir: str = "evidence") -> dict[str, Any]:
+        if self.vault is not None:
+            payload = self.vault.mask_protected(payload)
         digest = hashlib.sha256(payload).hexdigest()
         safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in name)[:80]
         rel = f"{subdir}/{digest[:12]}-{safe}"

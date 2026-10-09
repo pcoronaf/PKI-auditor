@@ -91,7 +91,11 @@ Una línea JSON por mensaje, petición y respuesta emparejadas:
 
 Comandos: `hello`, `schema`, `validate`, `rules`, `start`, `action`, `poll`,
 `navigate`, `network`, `live`, `live_options`, `status`, `finish`, `report`,
-`shutdown`. Están documentados en `firmascope/gui_bridge/bridge.py`.
+`shutdown`, y `login_start` / `login_save` / `login_cancel` para iniciar sesión
+en el portal antes de auditar. El inicio de sesión va en dos comandos porque el
+puente atiende uno por vez y no puede bloquearse esperando a la persona; la
+contraseña de la cuenta se escribe en el navegador y nunca pasa por el puente.
+Están documentados en `firmascope/gui_bridge/bridge.py`.
 
 Los eventos de la auditoría **no se empujan**: la interfaz los pide con `poll`
 cada 700 ms. Así todo ocurre en un solo hilo —el mismo que controla Playwright,

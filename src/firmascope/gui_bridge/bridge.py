@@ -86,6 +86,8 @@ class Bridge:
         self.report: dict[str, Any] | None = None
         self.closed = False
         self.autopilot: Any = None
+        self.login: Any = None
+        self.login_path: Path | None = None
 
     # ------------------------------------------------------------------
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -146,6 +148,10 @@ class Bridge:
                   password: str | None = None) -> dict[str, Any]:
         if self.session is not None:
             raise BridgeError("ya hay una sesion en marcha")
+        if self.login is not None:
+            # Dos instancias de Playwright en el mismo hilo no conviven; y
+            # auditar con la sesion a medio iniciar no tendria sentido.
+            raise BridgeError("termine o cancele primero el inicio de sesion en el portal")
         answers = dict(answers or {})
         problems = options_module.validate(answers)
         if problems:
@@ -184,6 +190,42 @@ class Bridge:
                 and session.controller.proxy.running)},
             "autopilot": self.autopilot is not None,
         }
+
+    # -- inicio de sesion en el portal -----------------------------------
+    def cmd_login_start(self, url: str = "", save: str = "",
+                        answers: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Abre un navegador sin instrumentar para que el operador inicie sesion.
+
+        Vuelve en cuanto la pagina carga; el operador avisa con
+        ``login_save`` cuando termino. La contrasena de la cuenta se escribe en
+        ese navegador y nunca pasa por el puente.
+        """
+        from ..audit_core.config import QUIET_BROWSER_ARGS, default_chromium_path, normalize_url
+        from ..browser_controller.session import LoginCapture, default_session_path
+
+        if self.session is not None or self.login is not None:
+            raise BridgeError("ya hay un navegador abierto")
+        url = normalize_url(url or str((answers or {}).get("target") or ""))
+        if not url:
+            raise BridgeError("escriba primero el sitio a auditar: la sesion se inicia en el")
+        self.login_path = Path(save).expanduser() if save else default_session_path(url)
+        self.login = LoginCapture(url, browser_path=default_chromium_path(),
+                                  browser_args=list(QUIET_BROWSER_ARGS)).start()
+        return {"url": url, "save": str(self.login_path)}
+
+    def cmd_login_save(self) -> dict[str, Any]:
+        if self.login is None:
+            raise BridgeError("no hay un inicio de sesion en curso")
+        login, path = self.login, self.login_path
+        self.login = self.login_path = None
+        summary = login.save(path)
+        return {"path": str(path), **summary}
+
+    def cmd_login_cancel(self) -> dict[str, Any]:
+        if self.login is not None:
+            self.login.close()
+        self.login = self.login_path = None
+        return {"cancelled": True}
 
     def cmd_action(self, action: str = "next", reason: str = "") -> dict[str, Any]:
         test = self._require_test()
@@ -314,6 +356,7 @@ class Bridge:
         return {"package": str(self.package), "report": self.report}
 
     def cmd_shutdown(self) -> dict[str, Any]:
+        self.cmd_login_cancel()
         if self.session is not None:
             try:
                 self.cmd_finish(aborted=True, reason="interfaz cerrada")

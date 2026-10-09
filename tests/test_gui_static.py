@@ -75,6 +75,7 @@ def test_la_interfaz_no_construye_campos_a_mano():
         "credentials",         # decide si hace falta la pantalla de consentimiento
         "accept_real_risk",    # tiene pantalla propia, no es un campo del form
         "key_path", "cert_path",   # extensiones del selector de archivos
+        "session_file",        # extension, y el boton de iniciar sesion a su lado
     }
     construidos = set(re.findall(r"data-option='([a-z_]+)'", JS))
     construidos |= set(re.findall(r"answers\[['\"]([a-z_]+)['\"]\]", JS))

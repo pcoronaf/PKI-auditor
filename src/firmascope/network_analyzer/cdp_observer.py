@@ -17,7 +17,7 @@ from collections import deque
 from typing import Any, Callable
 
 from ..audit_core.config import AuditConfig
-from ..audit_core.events import Event, EventType, Tag
+from ..audit_core.events import Event, EventType, Tag, now
 from ..audit_core.secrets import SecretVault
 from ..evidence_store.store import EvidenceStore, RequestRecord
 from . import domains
@@ -41,6 +41,8 @@ class NetworkObserver:
         self._sockets: dict[str, str] = {}
         self._sessions: list[Any] = []
         self.request_count = 0
+        #: Diferencia entre el reloj de pared y el reloj monotono de CDP.
+        self._clock_offset: float | None = None
 
     # ------------------------------------------------------------------
     def attach(self, page, context_name: str = "main") -> None:
@@ -89,7 +91,23 @@ class NetworkObserver:
         getattr(self, f"_on_{method}", lambda *_: None)(params, context_name)
 
     # -- HTTP -----------------------------------------------------------
+    def _wall_time(self, params: dict[str, Any]) -> float:
+        """Marca de pared para eventos que CDP solo fecha con su reloj monotono.
+
+        Solo ``requestWillBeSent`` trae ``wallTime``; de el se obtiene la
+        diferencia entre ambos relojes y se aplica al resto. Sin ella, las
+        respuestas quedaban fechadas en 1970 en el expediente. Si aun no se
+        conoce la diferencia, la hora de proceso es mejor aproximacion que una
+        marca monotona. Portado del PR #2.
+        """
+        monotonic = params.get("timestamp")
+        if monotonic and self._clock_offset is not None:
+            return float(monotonic) + self._clock_offset
+        return now()
+
     def _on_requestWillBeSent(self, params: dict[str, Any], context_name: str) -> None:
+        if params.get("wallTime") and params.get("timestamp"):
+            self._clock_offset = float(params["wallTime"]) - float(params["timestamp"])
         request = params.get("request", {})
         url = request.get("url", "")
         if url.startswith(("data:", "blob:", "chrome-extension:")):
@@ -109,7 +127,7 @@ class NetworkObserver:
 
         host = domains.host_of(url)
         record = RequestRecord(
-            timestamp=params.get("wallTime") or params.get("timestamp") or 0.0,
+            timestamp=params.get("wallTime") or self._wall_time(params),
             method=request.get("method", "GET"),
             url=url,
             host=host,
@@ -145,7 +163,7 @@ class NetworkObserver:
             "stack": stack[:5],
         }
         if canaries:
-            data["canary_matches"] = [m.to_dict() for m in canaries]
+            data["canary_matches"] = canaries
         if record.redirect_from:
             data["redirect_from"] = record.redirect_from
         self.emit(Event(EventType.NETWORK_REQUEST, self.session_id, timestamp=record.timestamp,
@@ -158,7 +176,7 @@ class NetworkObserver:
         if record is not None:
             self.store.update_request(record.id, status=int(response.get("status", 0)))
         self.emit(Event(EventType.NETWORK_RESPONSE, self.session_id,
-                        timestamp=params.get("timestamp") or 0.0, context=context_name,
+                        timestamp=self._wall_time(params), context=context_name,
                         sensor="cdp", data={
                             "url": response.get("url", ""),
                             "status": response.get("status"),
@@ -176,7 +194,7 @@ class NetworkObserver:
     def _on_loadingFailed(self, params: dict[str, Any], context_name: str) -> None:
         record = self._requests.get(params.get("requestId", ""))
         self.emit(Event(EventType.NETWORK_FAILED, self.session_id,
-                        timestamp=params.get("timestamp") or 0.0, context=context_name, sensor="cdp",
+                        timestamp=self._wall_time(params), context=context_name, sensor="cdp",
                         data={
                             "url": record.url if record else "",
                             "error": params.get("errorText", ""),
@@ -204,7 +222,7 @@ class NetworkObserver:
             "body_digest": hashlib.sha256(raw).hexdigest() if raw else "",
         }
         if canaries:
-            data["canary_matches"] = [m.to_dict() for m in canaries]
+            data["canary_matches"] = canaries
         self.emit(Event(EventType.WEBSOCKET_SEND, self.session_id, context=context_name, sensor="cdp",
                         tags=tags, data=data))
 
@@ -230,14 +248,14 @@ class NetworkObserver:
 
     # ------------------------------------------------------------------
     def _classify_body(self, body: bytes | None, url: str) -> tuple[list[str], list]:
-        """Etiqueta un cuerpo saliente buscando representaciones de canarios."""
-        if not body:
-            return [], []
-        matches = self.vault.scan(body) if self.vault else []
-        tags = sorted({m.label for m in matches})
-        if not tags and body:
-            tags = [Tag.UNCLASSIFIED.value]
-        return tags, matches
+        """Etiqueta una salida buscando canarios en el cuerpo **y en la URL**.
+
+        Un pixel de seguimiento lleva el .key en la query string de un GET sin
+        cuerpo: mirar solo el cuerpo lo hacia invisible.
+        """
+        from .canaries import classify
+
+        return classify(self.vault, body, url)
 
 
 # ----------------------------------------------------------------------
@@ -270,11 +288,10 @@ def _decode_frame(payload: str, response: dict[str, Any]) -> bytes:
 
 
 def _clip_headers(headers: dict[str, Any]) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for key, value in list(headers.items())[:40]:
-        text = str(value)
-        out[str(key)[:64]] = text[:256]
-    return out
+    """Ver :func:`firmascope.network_analyzer.headers.clip_headers`."""
+    from .headers import clip_headers
+
+    return clip_headers(headers)
 
 
 def _safe_name(url: str) -> str:
