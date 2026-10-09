@@ -156,6 +156,10 @@ class ProxyRunner:
             self.error = f"el proxy no acepta conexiones en {self.server}"
             self.stop()
             return False
+        if not self._wait_ca(timeout):
+            self.error = f"el proxy no genero su CA en {self._confdir}"
+            self.stop()
+            return False
 
         self.running = True
         self.emit(Event(EventType.CHECKPOINT, self.session_id, sensor="proxy",
@@ -176,6 +180,23 @@ class ProxyRunner:
                     return True
             except OSError:
                 time.sleep(0.1)
+        return False
+
+    def _wait_ca(self, timeout: float) -> bool:
+        """Espera a que mitmproxy haya escrito su CA.
+
+        mitmproxy la genera en su hook ``running``, a la vez que empieza a
+        escuchar: ver el puerto abierto no basta. Una conexion TLS que llegue
+        antes no podria interceptarse, y su contenido quedaria sin observar
+        sin que nada lo dijera.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.error:
+                return False
+            if self._confdir is not None and any(self._confdir.glob("*-ca.pem")):
+                return True
+            time.sleep(0.05)
         return False
 
     # ------------------------------------------------------------------
