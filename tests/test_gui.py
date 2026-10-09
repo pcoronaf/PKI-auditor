@@ -14,6 +14,7 @@ las validaciones sean las suyas y que las etapas las decida su maquina.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,7 +25,11 @@ pytestmark = pytest.mark.e2e
 
 ROOT = Path(__file__).resolve().parents[1]
 UI = ROOT / "gui" / "ui" / "index.html"
-CHROMIUM = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+def _chromium() -> str | None:
+    """El Chromium que usaria FirmaScope; None deja elegir a Playwright."""
+    from firmascope.audit_core.config import default_chromium_path
+
+    return default_chromium_path()
 
 
 class BridgeProcess:
@@ -36,8 +41,7 @@ class BridgeProcess:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, bufsize=1,
             cwd=str(ROOT),
-            env={"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin",
-                 "PLAYWRIGHT_BROWSERS_PATH": "/opt/pw-browsers"},
+            env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
         )
         self.counter = 0
 
@@ -73,8 +77,10 @@ def gui(lab, tmp_path):
 
     bridge = BridgeProcess()
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(executable_path=CHROMIUM, headless=True,
-                                     args=["--no-sandbox"])
+        launch = {"headless": True}
+        if _chromium():
+            launch["executable_path"] = _chromium()
+        browser = pw.chromium.launch(**launch)
         page = browser.new_page()
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)))

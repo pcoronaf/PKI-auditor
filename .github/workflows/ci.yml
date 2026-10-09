@@ -1,0 +1,73 @@
+# Pruebas de FirmaScope en cada PR y en cada push a main.
+#
+# Las pruebas de extremo a extremo no son opcionales: son las unicas que
+# comparan los hallazgos con la verdad conocida del laboratorio. Una prueba
+# unitaria verde no dice si la herramienta afirma lo correcto.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pruebas:
+    name: pruebas
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # El runner es una maquina efimera que solo carga los laboratorios. El
+      # sandbox de Chromium sigue activado por omision en cualquier otro sitio.
+      FIRMASCOPE_NO_SANDBOX: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[proxy,dev]"
+          python -m playwright install --with-deps chromium
+
+      - name: Pruebas unitarias
+        run: python -m pytest tests/ -q -m "not e2e"
+
+      - name: Pruebas de extremo a extremo (laboratorio y Chromium real)
+        run: python -m pytest tests/ -q -m "e2e"
+
+  interfaz:
+    name: interfaz (Tauri)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: WebKitGTK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            build-essential libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri
+
+      - name: Compilar
+        working-directory: gui/src-tauri
+        # --locked: se compila exactamente el arbol de Cargo.lock. Un cambio
+        # de dependencia tiene que aparecer en el diff, no colarse en la CI.
+        run: cargo build --release --locked
