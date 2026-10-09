@@ -110,9 +110,20 @@ def test_el_sandbox_no_se_desactiva_por_omision():
 def test_el_sandbox_solo_se_desactiva_como_root(monkeypatch):
     import firmascope.browser_controller.launch as launch
 
+    # La CI define FIRMASCOPE_NO_SANDBOX para todo el trabajo: sin limpiarla,
+    # la prueba media el entorno y no la funcion.
+    monkeypatch.delenv("FIRMASCOPE_NO_SANDBOX", raising=False)
     monkeypatch.setattr(launch.os, "geteuid", lambda: 1000, raising=False)
     assert launch.sandbox_by_default() is True
     monkeypatch.setattr(launch.os, "geteuid", lambda: 0, raising=False)
+    assert launch.sandbox_by_default() is False
+
+
+def test_el_sandbox_se_desactiva_por_decision_explicita(monkeypatch):
+    import firmascope.browser_controller.launch as launch
+
+    monkeypatch.setattr(launch.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setenv("FIRMASCOPE_NO_SANDBOX", "1")
     assert launch.sandbox_by_default() is False
 
 
