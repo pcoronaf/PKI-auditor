@@ -16,7 +16,7 @@ Y distingue rigurosamente entre **“no observé transmisión de la clave”** y
 reproducibles y basados en evidencia.
 
 > **Estado: completo y verificado contra el laboratorio.** Las pruebas
-> TC-001..TC-007 se ejecutan con un Chromium real y comparan cada hallazgo con
+> TC-001..TC-008 se ejecutan con un Chromium real y comparan cada hallazgo con
 > la verdad conocida del laboratorio; la interfaz gráfica se prueba contra el
 > núcleo de verdad. Ver
 > [Estado de implementación](#estado-de-implementación).
@@ -41,11 +41,31 @@ navegador.
 
 ```text
 firmascope audit [URL]        auditar un sitio
+firmascope audit URL --auto   auditar sin operador (sólo credencial sintética)
 firmascope options            listar las opciones configurables (--json para una GUI)
 firmascope credentials new    generar una credencial sintética de laboratorio
-firmascope rules              listar el catálogo de reglas
+firmascope rules [--json]     listar el catálogo (--rules DIR añade paquetes propios)
+firmascope labs list|serve    aplicaciones de laboratorio
 firmascope verify DIR         verificar la cadena de evidencias de un expediente
 ```
+
+### Auditoría desatendida
+
+```bash
+firmascope audit https://portal.ejemplo.mx --auto --headless
+```
+
+El piloto automático recorre las mismas etapas que un operador: espera a que
+carguen los recursos, detecta el formulario de firma, lo rellena con la
+credencial sintética **con la red cortada**, y envía la firma con la red
+restablecida. Sirve para auditar un portal cada noche o tras cada despliegue, y
+ver si su comportamiento cambió.
+
+**Sólo funciona con credencial sintética**, y la CLI se niega en lugar de
+degradar. Rellenar automáticamente una e.firma real en un portal sin
+caracterizar sería entregar la clave sin que nadie vea a quién. Si el
+formulario no se reconoce, el piloto lo dice y la auditoría queda
+`INCONCLUSIVE` en lugar de afirmar nada.
 
 Los argumentos de línea de comandos siguen funcionando, pero **precargan** las
 respuestas del asistente en lugar de ser la única vía; `--no-interactive` no
@@ -272,15 +292,15 @@ Otras desviaciones deliberadas respecto de la especificación:
 | Motor de reglas y catálogo `FS-*` (12 reglas) | implementado |
 | Motor de correlación de sensores | implementado |
 | Motor de reportes (HTML + JSON) | implementado |
-| CLI con asistente interactivo | implementado |
+| CLI con asistente interactivo y piloto automático | implementado |
 | Addon de mitmproxy (interceptación TLS, nivel 4) | implementado |
 | Aplicaciones de laboratorio (5, con lógica) | implementado |
 | Interfaz gráfica (Tauri) | implementado |
-| Pruebas TC-001..TC-007, GUI y unitarias (72) | implementado |
+| Pruebas TC-001..TC-008, GUI y unitarias | implementado |
 
 ```bash
 pip install -e ".[proxy,dev]"
-PYTHONPATH=src python3 -m pytest tests/ -q                # 72 pruebas
+PYTHONPATH=src python3 -m pytest tests/ -q
 PYTHONPATH=src python3 -m pytest tests/ -q -m "not e2e"   # sin navegador
 ```
 

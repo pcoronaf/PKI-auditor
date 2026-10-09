@@ -341,6 +341,13 @@ class AuditConfig:
     correlation_window_ms: int = 5000
     #: Etiqueta libre del operador para identificar la prueba.
     note: str = ""
+    #: Recorrer las etapas sin operador, rellenando el formulario con la
+    #: credencial sintetica. Solo admite credencial sintetica: ver
+    #: :mod:`firmascope.browser_controller.autopilot`.
+    autopilot: bool = False
+    #: Segundos por etapa y en la etapa de firma, en modo piloto automatico.
+    dwell: float = 3.0
+    offline_dwell: float = 4.0
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
@@ -354,6 +361,11 @@ class AuditConfig:
             self.proxy.enabled = proxy_available()
         elif self.proxy.enabled is None:
             self.proxy.enabled = False
+        if self.autopilot and self.credential_mode is not CredentialMode.SYNTHETIC:
+            raise ValueError(
+                "el piloto automatico solo funciona con la credencial sintetica de "
+                "laboratorio: con una credencial propia o real, el formulario lo "
+                "rellena usted, viendo a que sitio se la entrega.")
         if self.credential_mode.is_real:
             self._harden_for_real_credentials()
         elif self.credential_mode is not CredentialMode.SYNTHETIC:

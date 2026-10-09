@@ -442,6 +442,14 @@ async function stageAction(action) {
   await withBusy(async () => {
     const result = await call('action', { action: action });
     state.stages = result.stages;
+    if (result.autopilot) {
+      const ap = result.autopilot;
+      if (ap.signed) { toast('Piloto: formulario rellenado y firma solicitada'); }
+      else if (ap.sent) { toast('Piloto: firma enviada'); }
+      else if (ap.notes && ap.notes.length) {
+        toast('Piloto: ' + ap.notes.join('; ') + '. Firme a mano en el navegador.', true);
+      }
+    }
     if (result.finished) {
       stopPolling();
       await finish(action === 'cancel');

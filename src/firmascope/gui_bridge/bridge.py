@@ -85,6 +85,7 @@ class Bridge:
         self.package: Path | None = None
         self.report: dict[str, Any] | None = None
         self.closed = False
+        self.autopilot: Any = None
 
     # ------------------------------------------------------------------
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -162,6 +163,13 @@ class Bridge:
             session.navigate(setup.config.target)
 
         self.test = session.controller.staged_offline_test()
+        if setup.config.autopilot:
+            from ..browser_controller.autopilot import Autopilot
+
+            # En la interfaz quien marca el ritmo es el operador: el piloto
+            # solo rellena y pulsa al entrar en la etapa que lo pide, sin las
+            # esperas que usa la CLI.
+            self.autopilot = Autopilot(session, 0, 0)
         stage = self.test.begin()
         return {
             "session": session.session_id,
@@ -174,12 +182,23 @@ class Bridge:
             "sensors": {"proxy": bool(
                 session.controller.proxy is not None
                 and session.controller.proxy.running)},
+            "autopilot": self.autopilot is not None,
         }
 
     def cmd_action(self, action: str = "next", reason: str = "") -> dict[str, Any]:
         test = self._require_test()
         stage = test.apply(StageAction.parse(action), reason)
+        autopilot_note = None
+        if stage is not None and self.autopilot is not None \
+                and stage.name in ("sign", "submit"):
+            self.autopilot.act(stage, wait=False)
+            autopilot_note = {
+                "signed": self.autopilot.signed,
+                "sent": self.autopilot.sent,
+                "notes": list(self.autopilot.notes),
+            }
         return {
+            "autopilot": autopilot_note,
             "stage": _stage_info(stage, test) if stage is not None else None,
             "finished": test.finished,
             "result": test.result().to_dict() if test.finished else None,
@@ -285,6 +304,7 @@ class Bridge:
                        if report_path.exists() else None)
         self.session = None
         self.test = None
+        self.autopilot = None
         return {"package": str(package), "report": self.report,
                 "html": str(package / "report.html")}
 

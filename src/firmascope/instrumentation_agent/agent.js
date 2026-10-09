@@ -484,29 +484,6 @@
       try { G.File = FSFile; } catch (e) { /* ignorado */ }
     }
 
-    /*
-     * FormData.append(name, blob, filename) NO guarda el Blob que recibe:
-     * construye un File nuevo con los mismos bytes. El objeto etiquetado se
-     * queda fuera del formulario y la procedencia se pierde justo antes del
-     * envio, que es donde mas falta hace.
-     *
-     * Por eso la etiqueta se fija en el propio FormData: es el objeto que
-     * llega al sumidero, y es el que la inspeccion del cuerpo consulta.
-     */
-    if (G.FormData && G.FormData.prototype) {
-      ['append', 'set'].forEach(function (method) {
-        var original = G.FormData.prototype[method];
-        if (typeof original !== 'function') { return; }
-        G.FormData.prototype[method] = function (name, value) {
-          var labels = [];
-          try {
-            labels = uniq(labelsOf(value).concat(labelsOf(name)));
-          } catch (e) { /* ignorado */ }
-          if (labels.length) { taint(this, labels); }
-          return original.apply(this, arguments);
-        };
-      });
-    }
   });
 
   /* ================================================================ */
@@ -817,6 +794,62 @@
         return function () {
           var out = original.apply(this, arguments);
           try { return taint(out, labelsOf(this)); } catch (e) { return out; }
+        };
+      });
+    }
+  });
+
+  guard('form-data', function () {
+    [[G.FormData, 'FormData'], [G.URLSearchParams, 'URLSearchParams']].forEach(function (entry) {
+      var Ctor = entry[0];
+      if (!Ctor || !Ctor.prototype) { return; }
+      ['append', 'set'].forEach(function (method) {
+        wrap(Ctor.prototype, method, function (original) {
+          return function () {
+            var labels = [];
+            for (var i = 1; i < arguments.length; i++) {
+              labels = labels.concat(labelsOf(arguments[i]));
+            }
+            // La clave tambien puede delatar el contenido ("keyFile").
+            labels = labels.concat(labelsOf(arguments[0]));
+            if (labels.length) { taint(this, labels); }
+            return original.apply(this, arguments);
+          };
+        });
+      });
+    });
+
+    // Un FormData construido desde un <form> hereda lo que el formulario
+    // contiene; el constructor no pasa por append.
+    var NativeFormData = G.FormData;
+    if (!NativeFormData) { return; }
+    function FSFormData(form) {
+      var instance = arguments.length ? new NativeFormData(form) : new NativeFormData();
+      if (form) {
+        var labels = labelsOf(form);
+        if (labels.length) { taint(instance, labels); }
+      }
+      return instance;
+    }
+    FSFormData.prototype = NativeFormData.prototype;
+    try { G.FormData = FSFormData; } catch (e) { /* ignorado */ }
+  });
+
+  guard('typed-arrays', function () {
+    var TypedArray = O.getPrototypeOf(Int8Array);
+    if (TypedArray && TypedArray.prototype) {
+      ['slice', 'subarray'].forEach(function (method) {
+        wrap(TypedArray.prototype, method, function (original) {
+          return function () {
+            return taint(original.apply(this, arguments), labelsOf(this));
+          };
+        });
+      });
+    }
+    if (G.ArrayBuffer && G.ArrayBuffer.prototype) {
+      wrap(G.ArrayBuffer.prototype, 'slice', function (original) {
+        return function () {
+          return taint(original.apply(this, arguments), labelsOf(this));
         };
       });
     }

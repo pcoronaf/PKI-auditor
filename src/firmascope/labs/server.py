@@ -57,7 +57,11 @@ class PortalHandler(SimpleHTTPRequestHandler):
             links = "".join(f'<li><a href="/{name}/">{name}</a></li>' for name in apps)
             body = (f"<!doctype html><meta charset=utf-8>"
                     f"<title>FirmaScope lab</title>"
-                    f"<h1>Aplicaciones de laboratorio</h1><ul>{links}</ul>").encode()
+                    f"<h1>Aplicaciones de laboratorio</h1>"
+                    f"<p><strong>No use credenciales reales.</strong> Varias de estas "
+                    f"aplicaciones envian la clave a un tercero a proposito. Use la "
+                    f"credencial sintetica de <code>firmascope credentials new</code>.</p>"
+                    f"<ul>{links}</ul>").encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -70,10 +74,14 @@ class PortalHandler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
         if self.path.startswith("/api/sign-server-side"):
-            # El portal recibe la clave. No se guarda: el laboratorio no
-            # necesita conservarla para demostrar que la recibio.
-            SERVER_SIDE.append({"bytes": len(body)})
-            self._json(200, {"signed": True, "where": "server"})
+            # El portal recibe la clave y la usa. Firmar de verdad es lo que
+            # hace concreto el riesgo de esta arquitectura: un servidor que
+            # tiene el .key y la contrasena puede firmar cuando quiera, no solo
+            # cuando el titular se lo pide. La clave no se guarda: el
+            # laboratorio no necesita conservarla para demostrarlo.
+            result = _sign_server_side(self.headers.get("Content-Type", ""), body)
+            SERVER_SIDE.append({"bytes": len(body), "signed": "signature" in result})
+            self._json(200 if "signature" in result else 400, result)
             return
         if self.path.startswith("/api/submit"):
             self._json(200, {"accepted": True})
@@ -83,6 +91,45 @@ class PortalHandler(SimpleHTTPRequestHandler):
 
 #: Peticiones de firma del lado servidor, para las pruebas.
 SERVER_SIDE: list[dict[str, Any]] = []
+
+
+def _multipart_fields(content_type: str, body: bytes) -> dict[str, bytes]:
+    """Campos de un cuerpo multipart/form-data, con la biblioteca estandar."""
+    from email.parser import BytesParser
+    from email.policy import HTTP
+
+    message = BytesParser(policy=HTTP).parsebytes(
+        f"Content-Type: {content_type}\r\n\r\n".encode() + body)
+    fields: dict[str, bytes] = {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if name:
+            fields[str(name)] = part.get_payload(decode=True) or b""
+    return fields
+
+
+def _sign_server_side(content_type: str, body: bytes) -> dict[str, Any]:
+    """Firma el documento con la clave que subio el navegador."""
+    import base64
+
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    if "multipart/form-data" not in content_type:
+        return {"error": "se esperaba multipart/form-data"}
+    fields = _multipart_fields(content_type, body)
+    key_der = fields.get("private_key") or fields.get("key")
+    password = fields.get("key_password") or fields.get("password")
+    document = fields.get("document", b"")
+    if not key_der or password is None:
+        return {"error": "faltan la clave o la contrasena"}
+    try:
+        key = serialization.load_der_private_key(key_der, password=password.strip())
+        signature = key.sign(document, padding.PKCS1v15(), hashes.SHA256())
+    except Exception as exc:
+        return {"error": f"no se pudo firmar: {type(exc).__name__}"}
+    return {"signed": True, "where": "server",
+            "signature": base64.b64encode(signature).decode()}
 #: Lo que recibio el recolector, para las pruebas.
 COLLECTED: list[dict[str, Any]] = []
 

@@ -249,3 +249,70 @@ def test_el_expediente_es_verificable_y_trae_el_informe(lab, tmp_path, credentia
     store = EvidenceStore(package, report["session"])
     assert store.verify_chain() == (True, None)
     store.close()
+
+
+# ----------------------------------------------------------------------
+# Piloto automatico: la auditoria sin nadie delante
+# ----------------------------------------------------------------------
+
+def run_autopilot(app: str, output_dir, *, isolation: str = "full"):
+    """Audita sin operador, como `firmascope audit URL --auto --headless`."""
+    from firmascope.browser_controller.autopilot import Autopilot
+
+    config = AuditConfig(
+        target=f"http://127.0.0.1:8765/{app}/",
+        headless=True,
+        output_dir=output_dir,
+        isolation=IsolationPolicy(mode=IsolationMode.parse(isolation)),
+        autopilot=True,
+        dwell=1.0,
+        offline_dwell=3.0,
+    )
+    session = AuditSession(config)
+    pilot = None
+    try:
+        session.prepare_credentials(credentials_dir=output_dir / "credenciales")
+        session.start_browser()
+        session.navigate(config.target)
+        pilot = Autopilot(session, config.dwell, config.offline_dwell)
+        session.controller.staged_offline_test().run(pilot)
+        session.collect_and_analyze()
+        session.evaluate()
+    finally:
+        package = session.finish()
+    report = json.loads((package / "report.json").read_text(encoding="utf-8"))
+    return report, pilot
+
+
+def test_tc008_el_piloto_audita_sin_operador(lab, tmp_path):
+    """Nadie toca el formulario: lo detecta, lo rellena y firma el piloto.
+
+    Con la red cortada en la etapa de firma, el intento de exfiltracion queda
+    bloqueado y el informe lo dice, igual que en TC-003 con operador.
+    """
+    lab.COLLECTED.clear()
+    report, pilot = run_autopilot("demo-key-exfiltration", tmp_path)
+
+    assert pilot.signed, f"el piloto no disparo la firma: {pilot.notes}"
+    assert pilot.sent, "el piloto no envio la firma en la etapa de envio"
+    assert not lab.COLLECTED, "el aislamiento no impidio la salida"
+    hallazgo = finding(report, "FS-KEY-001")
+    assert hallazgo["status"] == "OBSERVED"
+    assert "intento" in hallazgo["summary"]
+    assert status(report, "FS-LOCAL-001") == "CONFIRMED"
+
+
+def test_el_piloto_no_acusa_a_un_sitio_correcto(lab, tmp_path):
+    lab.COLLECTED.clear()
+    report, pilot = run_autopilot("demo-safe", tmp_path)
+    assert pilot.signed
+    assert not lab.COLLECTED
+    for regla in ("FS-KEY-001", "FS-KEY-002", "FS-PWD-001"):
+        assert status(report, regla) == "NOT_OBSERVED", regla
+    assert status(report, "FS-LOCAL-001") == "CONFIRMED"
+
+
+def test_el_piloto_se_niega_con_una_credencial_que_no_es_sintetica():
+    """Rellenar una e.firma propia sin nadie delante no se permite."""
+    with pytest.raises(ValueError):
+        AuditConfig(target="https://x.mx", credential_mode="own-test", autopilot=True)

@@ -153,9 +153,12 @@ def test_el_cuerpo_multipart_es_lo_que_este_sensor_aporta(proxy, lab):
         f"{PASSWORD}\r\n--{frontera}--\r\n"
     ).encode()
 
+    # El servidor del laboratorio intenta firmar con lo que recibe, y estos
+    # bytes no son un .key valido: respondera 400. Da igual. Lo que se prueba
+    # es lo que vio el proxy por el camino, no el veredicto del servidor.
     assert _post(proxy, "http://127.0.0.1:8765/api/sign-server-side", cuerpo,
                  f"multipart/form-data; boundary={frontera}",
-                 "127.0.0.1:8765") == 200
+                 "127.0.0.1:8765") in (200, 400)
     time.sleep(0.6)
     proxy.pump()
 

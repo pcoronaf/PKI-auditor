@@ -71,32 +71,51 @@ CRYPTO_TRANSFORMS = frozenset(
     }
 )
 
-#: Funciones que transforman un valor sin perder su procedencia.
-TRANSFORMS = frozenset(
+#: Transformaciones *reversibles*: cambian la representacion, no el contenido.
+#:
+#: Un .key en base64 sigue siendo el .key — quien reciba esos bytes tiene la
+#: clave. Por eso atravesar una de estas funciones no convierte el dato en
+#: "derivado": la transmision se sigue considerando directa (FS-KEY-001).
+REVERSIBLE_TRANSFORMS = frozenset(
     {
         "btoa", "atob", "encodeURI", "encodeURIComponent", "decodeURIComponent",
         "stringify", "parse", "encode", "decode", "toBase64", "fromBase64",
         "toString", "slice", "subarray", "join", "concat", "map", "from",
         "hex", "toHex", "fromHex", "buffer", "bytes", "serialize", "pack",
-        "compress", "deflate", "gzip", "cipher", "seal", "wrap", "obfuscate",
     }
 )
+
+#: Transformaciones que *oscurecen* el dato: el contenido deja de ser legible
+#: para quien observa el canal. La procedencia se conserva, pero la salida ya
+#: no es el material original (FS-KEY-002).
+OBSCURING_TRANSFORMS = frozenset(
+    {
+        "compress", "deflate", "gzip", "cipher", "seal", "wrap", "obfuscate",
+        "encrypt", "digest", "wrapKey", "deriveBits", "deriveKey",
+    }
+)
+
+#: Funciones que transforman un valor sin perder su procedencia.
+TRANSFORMS = REVERSIBLE_TRANSFORMS | OBSCURING_TRANSFORMS
 
 #: Constructores que envuelven datos conservando la procedencia.
 TRANSFORM_CONSTRUCTORS = frozenset({"Blob", "File", "FormData", "URLSearchParams", "Uint8Array", "DataView"})
 
-#: Contenedores que *no transforman* los bytes: envolver no es derivar. Los
-#: bytes de la clave siguen presentes verbatim y saldrian reconocibles en el
-#: cuerpo de la peticion, asi que la ruta es transmision directa. Tratarlos como
-#: derivados degradaria el patron de subida de .key mas comun que existe
-#: (multipart/form-data) de "clave transmitida" a "dato derivado".
-CONTAINERS = frozenset({"Blob", "File", "FormData", "URLSearchParams", "Uint8Array", "DataView"})
+#: Contenedores: envolver no es transformar. Los bytes de la clave siguen
+#: presentes verbatim dentro de un Blob o un FormData y saldrian reconocibles
+#: en el cuerpo de la peticion, asi que la ruta es transmision directa.
+CONTAINERS = TRANSFORM_CONSTRUCTORS
 
-#: Metodos que meten un valor dentro de un contenedor. La procedencia pasa al
-#: *receptor*: tras `form.append('k', keyBytes)`, es `form` lo que lleva la
-#: clave, y `form` es lo que llega al sumidero.
-CONTAINER_MUTATORS = frozenset(
-    {"append", "set", "add", "push", "unshift", "write", "enqueue", "put"}
+
+#: Metodos que *acumulan* el argumento dentro del objeto receptor.
+#:
+#: A diferencia de una transformacion, aqui el dato no se consume: pasa a
+#: formar parte del receptor. Un ``FormData`` al que se le anadio el .key
+#: transporta el .key, y enviarlo equivale a enviar la clave. Sin esta regla
+#: el patron ``form.append('key', blob); fetch(url, {body: form})`` — el mas
+#: comun para subir un fichero — quedaria fuera del analisis.
+ACCUMULATOR_METHODS = frozenset(
+    {"append", "set", "add", "push", "unshift", "enqueue", "insert", "write"}
 )
 
 
@@ -165,7 +184,12 @@ NAME_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
                 re.I), Tag.KEY_FILE.value),
     (re.compile(r"certific|\.cer\b|\bcer[_-]?file\b|\bcrt\b|\bx509\b", re.I), Tag.CERTIFICATE.value),
     (re.compile(r"signature|\bfirma\b|signed[_-]?data|\bsello\b", re.I), Tag.SIGNATURE.value),
-    (re.compile(r"document|documento|payload|\bxml\b|\bpdf\b|cadena[_-]?original", re.I), Tag.DOCUMENT.value),
+    # "payload" queda fuera a proposito: nombra el cuerpo de cualquier peticion,
+    # no el documento a firmar. Incluirlo etiquetaba como DOCUMENT la variable
+    # de `upload(payload)` en un exfiltrador, y como DOCUMENT no es privado ni
+    # es "sin clasificar", el hallazgo desaparecia. Una procedencia inventada es
+    # peor que ninguna: suprime lo que si se podia afirmar.
+    (re.compile(r"document|documento|\bxml\b|\bpdf\b|cadena[_-]?original", re.I), Tag.DOCUMENT.value),
 )
 
 #: Nombres que parecen clave pero son material publico: evitan falsos positivos.
@@ -229,6 +253,19 @@ def match_pattern(patterns: tuple[CallPattern, ...], member: str, object_text: s
 
 def is_transform(name: str) -> bool:
     return name in TRANSFORMS or name in CRYPTO_TRANSFORMS
+
+
+def obscures(name: str) -> bool:
+    """True si la transformacion vuelve opaco el contenido transmitido.
+
+    Determina si una salida se reporta como transmision *directa* del material
+    (FS-KEY-001) o como salida de un dato *derivado* de el (FS-KEY-002). El
+    nombre puede venir cualificado (``crypto.subtle.encrypt``), asi que se
+    compara tambien el ultimo segmento.
+    """
+    if not name:
+        return False
+    return name in OBSCURING_TRANSFORMS or name.rsplit(".", 1)[-1] in OBSCURING_TRANSFORMS
 
 
 def looks_like_egress_name(name: str) -> bool:

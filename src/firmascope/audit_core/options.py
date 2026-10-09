@@ -115,6 +115,10 @@ def _is_not_real_credential(answers: dict[str, Any]) -> bool:
     return not _is_real_credential(answers)
 
 
+def _is_synthetic_credential(answers: dict[str, Any]) -> bool:
+    return str(answers.get("credentials", "synthetic") or "synthetic") == "synthetic"
+
+
 def _is_full_level(answers: dict[str, Any]) -> bool:
     return str(answers.get("level", "")) == "4"
 
@@ -277,6 +281,18 @@ AUDIT_OPTIONS: tuple[Option, ...] = (
         group="avanzado",
     ),
     Option(
+        id="autopilot",
+        label="Piloto automatico",
+        kind=OptionKind.BOOL,
+        default=False,
+        depends_on=_is_synthetic_credential,
+        help="Recorre las etapas sin operador y rellena el formulario de firma con "
+             "la credencial sintetica. Util para auditar un portal de forma "
+             "repetida. Solo existe con credencial sintetica: una e.firma propia la "
+             "introduce usted, viendo a que sitio se la entrega.",
+        group="avanzado",
+    ),
+    Option(
         id="capture_bodies",
         label="Guardar cuerpos HTTP en el expediente",
         kind=OptionKind.BOOL,
@@ -436,6 +452,10 @@ def build_config(answers: dict[str, Any]) -> AuditConfig:
         acknowledge_real_credentials=bool(answers.get("accept_real_risk", False)),
         isolation=isolation,
         proxy=proxy,
+        # El piloto solo se aplica si el campo esta visible: si el operador
+        # lo activo y luego cambio a una credencial propia, no debe arrastrarse.
+        autopilot=bool(answers.get("autopilot", False))
+        and _is_synthetic_credential(answers),
         first_party_domains=_as_list(answers.get("first_party")),
         note=str(answers.get("note") or ""),
     )

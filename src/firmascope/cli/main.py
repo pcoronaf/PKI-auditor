@@ -1,9 +1,11 @@
 """Interfaz de linea de comandos de FirmaScope.
 
     firmascope audit [URL]        auditar un sitio (la URL puede darse despues)
+    firmascope audit URL --auto   auditar sin operador (credencial sintetica)
     firmascope options            listar las opciones configurables
     firmascope credentials new    generar una credencial sintetica de laboratorio
     firmascope rules              listar el catalogo de reglas
+    firmascope labs list|serve    aplicaciones de laboratorio
     firmascope verify DIR         verificar la cadena de evidencias de un expediente
     firmascope version
 
@@ -252,13 +254,18 @@ def _seed_from_args(args: argparse.Namespace) -> dict[str, Any]:
         seed["headless"] = True
     if getattr(args, "i_accept_real_credential_risk", False):
         seed["accept_real_risk"] = True
+    if getattr(args, "auto", False):
+        seed["autopilot"] = True
     return seed
 
 
 def _resolve_setup(args: argparse.Namespace) -> SetupResult | None:
     """Obtiene la configuracion: por asistente interactivo o desde argumentos."""
     seed = _seed_from_args(args)
-    interactive = not args.no_interactive and wizard.interactive_possible()
+    # El piloto automatico existe para no tener a nadie delante: preguntar la
+    # configuracion por terminal le quitaria el sentido.
+    interactive = (not args.no_interactive and not getattr(args, "auto", False)
+                   and wizard.interactive_possible())
 
     if interactive:
         return wizard.run_setup(seed)
@@ -266,6 +273,20 @@ def _resolve_setup(args: argparse.Namespace) -> SetupResult | None:
     # Modo no interactivo: el esquema aporta los valores por defecto.
     answers = defaults()
     answers.update(seed)
+
+    if getattr(args, "auto", False):
+        # En el asistente, desactivar un campo que quedo oculto es lo correcto:
+        # el operador cambio de idea. Aqui `--auto` es una orden explicita, y
+        # descartarla en silencio para seguir en modo interactivo -- sin nadie
+        # delante -- seria peor que negarse.
+        from ..audit_core.config import CredentialMode
+        from ..browser_controller.autopilot import AutopilotRefused, check_allowed
+
+        try:
+            check_allowed(CredentialMode.parse(str(answers.get("credentials") or "synthetic")))
+        except (AutopilotRefused, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return None
     password = None
     if needs_password(answers):
         password = getpass.getpass("Contrasena de la clave privada: ")
@@ -285,6 +306,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
         return 2
     config = setup.config
     password = setup.password
+    if getattr(args, "dwell", None) is not None:
+        config.dwell = float(args.dwell)
+    if getattr(args, "offline_dwell", None) is not None:
+        config.offline_dwell = float(args.offline_dwell)
 
     session = AuditSession(config, on_event=_print_event)
     print(f"FirmaScope {__version__} · sesion {session.session_id}")
@@ -318,7 +343,18 @@ def cmd_audit(args: argparse.Namespace) -> int:
             print("o navegue directamente en la ventana del navegador.")
 
         test = session.controller.staged_offline_test()
-        result = test.run(InteractiveStageController(session, credential))
+        if config.autopilot:
+            from ..browser_controller.autopilot import Autopilot
+
+            print("\nPiloto automatico: las etapas avanzan solas.")
+            controller = Autopilot(session, config.dwell, config.offline_dwell)
+        else:
+            controller = InteractiveStageController(session, credential)
+        result = test.run(controller)
+        if config.autopilot and not controller.signed:
+            print("aviso: no se pudo disparar la firma en el portal "
+                  f"({'; '.join(controller.notes) or 'formulario no reconocido'}). "
+                  "Las reglas que dependen del material privado seran INCONCLUSIVE.")
         aborted = result.aborted
         reason = result.abort_reason
 
@@ -357,9 +393,9 @@ def cmd_audit(args: argparse.Namespace) -> int:
 def cmd_credentials_new(args: argparse.Namespace) -> int:
     from ..credentials import generate
 
-    credential = generate()
+    credential = generate(password=args.password or None)
     directory = Path(args.output)
-    credential.write(directory)
+    credential.write(directory, stem=args.stem)
     print("Credencial sintetica de laboratorio:")
     print(f"  .cer         {credential.cert_path}")
     print(f"  .key         {credential.key_path}")
@@ -413,13 +449,50 @@ def cmd_options(args: argparse.Namespace) -> int:
 def cmd_rules(args: argparse.Namespace) -> int:
     from ..rule_engine.engine import RuleEngine
 
-    engine = RuleEngine()
-    for meta in engine.rules:
-        if args.category and meta.category != args.category:
-            continue
+    engine = RuleEngine(extra_dirs=[Path(d) for d in (args.rules or [])])
+    selected = [m for m in engine.rules
+                if not args.category or m.category == args.category]
+    if args.json:
+        print(json.dumps([
+            {"id": m.id, "title": m.title, "category": m.category,
+             "severity": m.severity.value, "summary": m.summary}
+            for m in selected], indent=2, ensure_ascii=False))
+        return 0
+    for meta in selected:
         print(f"{meta.id:<16} {meta.severity.value:<9} {meta.category:<9} {meta.title}")
         if args.verbose:
             print(f"    {meta.summary}")
+    return 0
+
+
+def cmd_labs_list(args: argparse.Namespace) -> int:
+    from ..labs import server as lab
+
+    apps = sorted(p.name for p in lab.APPS.iterdir()
+                  if p.is_dir() and p.name.startswith("demo-"))
+    for name in apps:
+        print(f"{name:<30} http://127.0.0.1:{lab.PORTAL_PORT}/{name}/")
+    print(f"\nrecolector de terceros: http://127.0.0.1:{lab.COLLECTOR_PORT}/")
+    return 0
+
+
+def cmd_labs_serve(args: argparse.Namespace) -> int:
+    import threading
+
+    from ..labs import server as lab
+
+    portal, collector = lab.serve(args.port, args.collector_port)
+    print(f"portal      http://127.0.0.1:{portal.server_address[1]}/")
+    print(f"recolector  http://127.0.0.1:{collector.server_address[1]}/")
+    print("Aplicaciones de laboratorio: no use credenciales reales con ellas.")
+    print("Ctrl-C para terminar.")
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        portal.shutdown()
+        collector.shutdown()
     return 0
 
 
@@ -491,6 +564,14 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--output", default=None, help="directorio de expedientes")
     audit.add_argument("--note", default=None,
                        help="etiqueta libre para identificar la prueba")
+    audit.add_argument("--auto", action="store_true",
+                       help="piloto automatico: recorre las etapas y rellena el "
+                            "formulario con la credencial sintetica. Solo con "
+                            "credencial sintetica.")
+    audit.add_argument("--dwell", type=float, default=None,
+                       help="segundos por etapa en piloto automatico (3)")
+    audit.add_argument("--offline-dwell", type=float, default=None,
+                       help="segundos en la etapa de firma en piloto automatico (4)")
     audit.add_argument("--no-interactive", action="store_true",
                        help="no preguntar nada: usar los argumentos y los valores por "
                             "defecto del esquema. Para guiones y canalizaciones.")
@@ -499,8 +580,12 @@ def build_parser() -> argparse.ArgumentParser:
     creds = sub.add_parser("credentials", help="credenciales sinteticas de laboratorio")
     creds_sub = creds.add_subparsers(dest="action", required=True)
     creds_new = creds_sub.add_parser("new", help="generar una credencial nueva")
-    creds_new.add_argument("--output", default="fixtures/synthetic-efirma",
+    creds_new.add_argument("-o", "--output", default="fixtures/synthetic-efirma",
                            help="directorio donde escribir .key y .cer")
+    creds_new.add_argument("--password", default=None,
+                           help="contrasena fija, para pruebas repetibles")
+    creds_new.add_argument("--stem", default="audit",
+                           help="nombre base de los archivos (audit.key, audit.cer)")
     creds_new.set_defaults(func=cmd_credentials_new)
 
     options_cmd = sub.add_parser(
@@ -513,7 +598,19 @@ def build_parser() -> argparse.ArgumentParser:
     rules.add_argument("--category", default=None,
                        help="efirma | crypto | network | storage | code")
     rules.add_argument("-v", "--verbose", action="store_true")
+    rules.add_argument("--json", action="store_true", help="salida JSON")
+    rules.add_argument("--rules", action="append", default=[],
+                       help="directorio adicional con paquetes de reglas YAML")
     rules.set_defaults(func=cmd_rules)
+
+    labs = sub.add_parser("labs", help="aplicaciones de laboratorio")
+    labs_sub = labs.add_subparsers(dest="action", required=True)
+    labs_list = labs_sub.add_parser("list", help="listar las aplicaciones")
+    labs_list.set_defaults(func=cmd_labs_list)
+    labs_serve = labs_sub.add_parser("serve", help="servir el laboratorio")
+    labs_serve.add_argument("--port", type=int, default=8765)
+    labs_serve.add_argument("--collector-port", type=int, default=8766)
+    labs_serve.set_defaults(func=cmd_labs_serve)
 
     verify = sub.add_parser("verify", help="verificar la cadena de evidencias")
     verify.add_argument("directory", help="directorio del expediente")
