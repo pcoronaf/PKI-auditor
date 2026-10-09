@@ -199,6 +199,13 @@ procedimiento y sus riesgos están en
 | 3 | Local Signing Test | ¿la firma se completa con la red aislada? |
 | 4 | Full Correlated Audit | instrumentación + CDP + estático + proxy + correlación |
 
+El nivel 1 **no inyecta nada en la página**: es también la prueba de control.
+Si un portal funciona en nivel 1 y deja de funcionar en nivel 2 o superior, la
+instrumentación lo está alterando, y eso es un fallo de FirmaScope. Los niveles
+1 y 2 no tienen prueba sin conexión, así que el flujo tiene cuatro etapas
+(cargar, preparar, firmar con red, enviar) y no se pregunta el aislamiento; lo
+mismo ocurre en los niveles 3 y 4 con «Sin aislamiento».
+
 ## Estados de conclusión
 
 | Estado | Significado |

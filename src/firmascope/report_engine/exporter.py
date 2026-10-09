@@ -67,14 +67,23 @@ def _sensors(events: list[Any], proxy: dict[str, Any] | None) -> dict[str, Any]:
         "proxy": bool(proxy.get("running")),
         "bodies_recovered_by_proxy": recovered,
     }
+    notes: list[str] = []
+    if not info["agent"]:
+        notes.append(
+            "Sin instrumentacion en la pagina (nivel 1): no se observo la lectura del "
+            ".key ni de la contrasena, asi que las reglas de procedencia quedan sin "
+            "concluir. Es tambien la prueba de control: si el sitio funciona aqui y no "
+            "con instrumentacion, la instrumentacion lo altera.")
     if not info["proxy"]:
-        info["limitation"] = (
+        notes.append(
             "Sin interceptacion TLS, los cuerpos que el navegador no entrega al "
             "depurador (subidas multipart, flujos) no se examinaron por contenido. "
             "La procedencia que aporta la instrumentacion sigue siendo valida; lo "
             "que no hay es prueba de contenido para esas peticiones.")
     elif proxy.get("error"):
-        info["limitation"] = str(proxy["error"])
+        notes.append(str(proxy["error"]))
+    if notes:
+        info["limitation"] = " ".join(notes)
     return info
 
 

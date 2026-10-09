@@ -169,7 +169,10 @@ async function boot() {
     const schema = await call('schema');
     state.schema = schema.options;
     state.answers = Object.assign({}, schema.defaults);
-    renderSetup();
+    // Que campos condicionales se ven lo decide el nucleo: sin preguntarle al
+    // arrancar, el aislamiento (que depende del nivel) no aparecia hasta que
+    // el operador cambiaba algo.
+    await refreshValidation();
     show('view-setup');
   } catch (err) {
     $('error-detail').textContent = String(err && err.message ? err.message : err);

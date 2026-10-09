@@ -228,7 +228,10 @@ class AuditSession:
     def versions(self) -> dict[str, Any]:
         info: dict[str, Any] = {
             "firmascope": __version__,
-            "agent_sha256": agent_sha256(),
+            # Sin instrumentacion (nivel 1) no hubo agente en la pagina, y el
+            # manifiesto no debe sugerir lo contrario.
+            "agent_sha256": agent_sha256() if self.config.instrumentation
+            else "(nivel 1: sin instrumentacion)",
             **environment_info(),
         }
         if self.controller is not None:
