@@ -54,6 +54,10 @@ class AuditContext:
     correlation: Any | None = None
     #: Etiquetas de canario registradas en el vault de la sesion.
     canary_labels: set[str] = field(default_factory=set)
+    #: Longitud de la contrasena de la credencial registrada, si la hay. Solo
+    #: sirve para descartar: un campo de contrasena cuyo valor nunca llega a esa
+    #: longitud no es el de la e.firma. Nunca sale de memoria.
+    key_password_length: int | None = None
 
     # -- consultas basicas ----------------------------------------------
     def events_of(self, *types: EventType) -> list[Event]:
@@ -96,8 +100,64 @@ class AuditContext:
         return str(event.data.get("host") or "")
 
     def key_access_events(self) -> list[Event]:
-        """Accesos a material *privado*: leer el documento o el .cer no cuenta."""
-        return [e for e in self.events if is_key_access(e)]
+        """Accesos a material *privado*: leer el documento o el .cer no cuenta.
+
+        Tampoco la contrasena de *otra cosa*: en el primer piloto del panel,
+        la lectura de la contrasena de la cuenta del portal, al iniciar sesion,
+        se tomo como acceso a la clave y adelanto el instante de referencia de
+        FS-NET-001 a antes de la firma.
+        """
+        return [e for e in self.events
+                if is_key_access(e) and not self.is_other_password_read(e)]
+
+    # -- contrasenas que no son la de la e.firma ------------------------
+    def _password_field(self, event: Event) -> str:
+        return str(event.data.get("input_id") or "")
+
+    def other_password_fields(self) -> set[str]:
+        """Campos de contrasena cuyo valor nunca tuvo la longitud de la e.firma.
+
+        El agente etiqueta como KEY_PASSWORD todo ``input[type=password]``,
+        porque desde la pagina no puede saber de que es la contrasena. Con la
+        credencial registrada si se puede descartar: un campo que nunca llega a
+        la longitud de su contrasena guarda otra (la de la cuenta del portal).
+        Se mira la lectura mas larga de cada campo, porque los frameworks leen
+        el valor mientras se escribe.
+        """
+        if not self.key_password_length:
+            return set()
+        longest: dict[str, int] = {}
+        unknown: set[str] = set()
+        for event in self.events_of(EventType.PASSWORD_READ):
+            name = self._password_field(event)
+            size = int(event.data.get("length") or 0)
+            if size <= 0:
+                # Sin longitud no hay con que descartar: el campo cuenta.
+                unknown.add(name)
+                continue
+            longest[name] = max(longest.get(name, 0), size)
+        return {name for name, size in longest.items()
+                if size != self.key_password_length and name not in unknown}
+
+    def is_other_password_read(self, event: Event) -> bool:
+        return (event.type is EventType.PASSWORD_READ
+                and self._password_field(event) in self.other_password_fields())
+
+    def contradicted(self, event: Event, label: Tag | str) -> bool:
+        """La etiqueta del agente la desmiente un sensor que vio los bytes.
+
+        Requiere el canario registrado (si no, no hay nada que buscar), un
+        cuerpo visto por CDP o el proxy, y que el dato no sea derivado: una
+        transformacion puede ocultar el canario, y entonces la ausencia no
+        prueba nada.
+        """
+        value = label.value if isinstance(label, Tag) else str(label)
+        if value not in self.canary_labels or self.correlation is None:
+            return False
+        if Tag.DERIVED.value in self.event_tags(event):
+            return False
+        group = self.correlation.group_of(event)
+        return group is not None and group.content_lacks(value)
 
     # -- tiempo ----------------------------------------------------------
     @staticmethod
@@ -125,8 +185,13 @@ class AuditContext:
         return bool(self.events_with_tag(Tag.KEY_FILE, Tag.PRIVATE_KEY))
 
     def observed_password(self) -> bool:
-        return bool(self.events_of(EventType.PASSWORD_READ)) or bool(
-            self.events_with_tag(Tag.KEY_PASSWORD))
+        """True si la sesion llego a usar la contrasena de la e.firma."""
+        if any(not self.is_other_password_read(e)
+               for e in self.events_of(EventType.PASSWORD_READ)):
+            return True
+        return any(e.type is not EventType.PASSWORD_READ
+                   and not (e.type in EGRESS_EVENTS and self.contradicted(e, Tag.KEY_PASSWORD))
+                   for e in self.events_with_tag(Tag.KEY_PASSWORD))
 
     def after_key_access(self, events: Iterable[Event]) -> list[Event]:
         """Filtra los eventos posteriores al primer acceso a la clave."""

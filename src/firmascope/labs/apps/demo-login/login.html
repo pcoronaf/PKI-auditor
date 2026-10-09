@@ -18,7 +18,33 @@
     <label for="account-password">Contrase&ntilde;a de la cuenta</label>
     <input type="password" id="account-password" name="password" autocomplete="current-password">
     <button id="login" type="submit">Entrar</button>
+    <div id="status" data-state="info"></div>
   </form>
 </main>
+<script>
+/*
+ * Como el portal real del primer piloto: una aplicacion de una pagina que lee
+ * la contrasena de la cuenta con JavaScript y la envia con fetch en JSON. Es
+ * esa lectura la que la instrumentacion marca como "campo de contrasena", y lo
+ * que llevo a confundirla con la contrasena de la e.firma.
+ */
+document.querySelector('form').addEventListener('submit', async function (event) {
+  event.preventDefault();
+  const res = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({
+      username: document.getElementById('username').value,
+      password: document.getElementById('account-password').value
+    })
+  });
+  if (res.ok) {
+    location.href = '/demo-login/';
+  } else {
+    document.getElementById('status').textContent = 'Usuario o contrasena incorrectos.';
+  }
+});
+</script>
 </body>
 </html>

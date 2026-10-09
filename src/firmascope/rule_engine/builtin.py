@@ -269,11 +269,29 @@ def key_derived_transmitted(context: AuditContext, meta) -> RuleResult:
 # Contrasena
 # ----------------------------------------------------------------------
 
+def _other_password_note(context: AuditContext, contradicted: Sequence[Event]) -> str:
+    if not contradicted:
+        return ""
+    return (f"\n\nOtro campo de contrasena se envio a {_destinations(contradicted, context)} "
+            "(por ejemplo, el inicio de sesion en el portal). No es la contrasena de la "
+            "e.firma: los sensores que vieron el cuerpo de esa peticion no la encontraron, ni en "
+            "claro ni codificada. La instrumentacion marca cualquier campo de tipo contrasena; "
+            "para no mezclar la cuenta con la firma, inicie sesion aparte "
+            "(`firmascope login`, o el boton de la interfaz).")
+
+
 @rule("FS-PWD-001")
 def password_transmitted(context: AuditContext, meta) -> RuleResult:
-    hits = context.any_egress(Tag.KEY_PASSWORD)
+    # Una salida que el agente marco por el tipo de campo, pero en cuyo cuerpo
+    # los sensores de contenido no encontraron la contrasena registrada, no es
+    # la contrasena de la e.firma. En el primer piloto del panel, el inicio de
+    # sesion en el portal se reporto como "la contrasena salio": el error que
+    # mas importa evitar.
+    contradicted = [e for e in context.any_egress(Tag.KEY_PASSWORD)
+                    if context.contradicted(e, Tag.KEY_PASSWORD)]
+    hits = [e for e in context.any_egress(Tag.KEY_PASSWORD) if e not in contradicted]
     if hits:
-        direct = context.direct_egress(Tag.KEY_PASSWORD)
+        direct = [e for e in context.direct_egress(Tag.KEY_PASSWORD) if e not in contradicted]
         sent, blocked = _split_blocked(context, hits)
         nature = ("en claro o en una codificacion reversible" if direct
                   else "de forma derivada (transformada)")
@@ -288,7 +306,7 @@ def password_transmitted(context: AuditContext, meta) -> RuleResult:
             summary=summary,
             detail=(f"La transmision se observo {nature}. La contrasena de la e.firma protege la "
                     "clave privada: su envio al servidor implica que el servidor puede usar la "
-                    "clave si tambien dispone del .key."),
+                    "clave si tambien dispone del .key." + _other_password_note(context, contradicted)),
             evidence=_evidence(context, hits, "transmision de la contrasena"),
             confidence=Confidence.HIGH if direct else Confidence.MEDIUM,
             severity=Severity.CRITICAL,
@@ -296,11 +314,12 @@ def password_transmitted(context: AuditContext, meta) -> RuleResult:
     if not context.observed_password():
         return RuleResult.inconclusive(
             "La sesion no llego a usar la contrasena de la clave privada.",
-            "No se observo lectura de un campo de contrasena relacionado con la firma.",
+            "No se observo lectura de un campo de contrasena relacionado con la firma."
+            + _other_password_note(context, contradicted),
         )
     return RuleResult.not_observed(
         "No se observo transmision de la contrasena.",
-        NOT_OBSERVED_CAVEAT,
+        NOT_OBSERVED_CAVEAT + _other_password_note(context, contradicted),
     )
 
 
@@ -542,6 +561,18 @@ def private_material_in_localstorage(context: AuditContext, meta) -> RuleResult:
 # Analisis estatico
 # ----------------------------------------------------------------------
 
+def _coverage_note(context: AuditContext) -> str:
+    """Lo que el analisis estatico no llego a cubrir, dicho en el hallazgo."""
+    missing = context.static.timed_out if context.static is not None else []
+    if not missing:
+        return ""
+    urls = ", ".join((s.get("url") or s.get("sha256", "")[:12]) for s in missing[:5])
+    more = f" y {len(missing) - 5} mas" if len(missing) > 5 else ""
+    return (f"\n\nCobertura incompleta: {len(missing)} scripts no se analizaron porque se "
+            f"agoto el tiempo del analisis estatico ({urls}{more}). Lo que contengan no "
+            "esta incluido en esta conclusion.")
+
+
 @rule("FS-CODE-001")
 def potential_key_to_network_path(context: AuditContext, meta) -> RuleResult:
     if context.static is None:
@@ -569,7 +600,7 @@ def potential_key_to_network_path(context: AuditContext, meta) -> RuleResult:
             status=Status.POTENTIAL,
             summary=(f"El codigo cargado contiene {len(paths)} rutas capaces de llevar material "
                      "sensible hasta un canal de salida."),
-            detail=detail + execution_note,
+            detail=detail + execution_note + _coverage_note(context),
             evidence=[context.code_evidence(p, "ruta source-to-sink") for p in paths[:12]],
             confidence=context.static.best_confidence(paths),
             severity=Severity.HIGH,
@@ -593,7 +624,7 @@ def potential_key_to_network_path(context: AuditContext, meta) -> RuleResult:
                 "a firmar.\n\nPara resolverlo: ejecute la prueba de firma sin conexion "
                 "(nivel 3) y compare el destino de cada ruta con el inventario de peticiones "
                 "del expediente. Si el destino es un tercero, vease FS-NET-001."
-            ) + execution_note,
+            ) + execution_note + _coverage_note(context),
             evidence=[context.code_evidence(p, "ruta de material sin clasificar")
                       for p in unclassified[:12]],
             confidence=context.static.best_confidence(unclassified),
@@ -607,11 +638,27 @@ def potential_key_to_network_path(context: AuditContext, meta) -> RuleResult:
     if context.static.parsed == 0:
         return RuleResult.inconclusive(
             "No se analizo ningun script.",
-            "No se recupero codigo fuente del inventario de scripts de la sesion.",
+            ("No se recupero codigo fuente del inventario de scripts de la sesion."
+             if not context.static.timed_out else
+             "Se agoto el tiempo del analisis estatico antes de terminar ningun script.")
+            + _coverage_note(context),
+        )
+    relevant = context.static.timed_out_relevant()
+    if relevant:
+        # Justo los scripts que leen archivos, contrasenas o usan cripto son los
+        # que podrian contener la ruta. Decir "no se identificaron rutas" sin
+        # haberlos analizado convertiria la falta de analisis en una conclusion.
+        return RuleResult.inconclusive(
+            f"No se analizaron {len(relevant)} scripts que manejan archivos, contrasenas o "
+            "criptografia: se agoto el tiempo del analisis estatico.",
+            f"En los {context.static.parsed} scripts que si se analizaron no hay rutas de "
+            "material sensible hacia canales de salida, pero los que quedaron fuera son "
+            "precisamente los que podrian contenerlas." + _coverage_note(context),
         )
     return RuleResult.not_observed(
         f"No se identificaron rutas de material sensible hacia canales de salida en "
         f"{context.static.parsed} scripts analizados.",
         "El analisis es aproximado: el codigo minificado, el despacho dinamico y las rutas que "
-        "atraviesan bibliotecas de terceros pueden ocultar flujos reales. " + NOT_OBSERVED_CAVEAT,
+        "atraviesan bibliotecas de terceros pueden ocultar flujos reales. " + NOT_OBSERVED_CAVEAT
+        + _coverage_note(context),
     )

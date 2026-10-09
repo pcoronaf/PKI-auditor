@@ -183,16 +183,37 @@ class PanelHandler(BaseHTTPRequestHandler):
         if csp:
             self.send_header("Content-Security-Policy", CSP)
         self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.wfile.write(payload)
+        except ConnectionError:
+            # La pestana se cerro o recargo con la orden en curso, o se
+            # cerro el panel con Ctrl-C: no hay a quien responder. En Windows
+            # llegaba como un traceback de ConnectionAbortedError por peticion.
+            pass
+
+
+class _QuietServer(ThreadingHTTPServer):
+    """No imprime trazas por conexiones que el navegador abandono."""
+
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        import sys
+
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
 
 
 class PanelServer:
     """Servidor del panel. El hilo principal atiende las ordenes con :meth:`serve`."""
 
     #: Segundos que una peticion espera respuesta del hilo principal. Arrancar
-    #: el navegador y el proxy puede tardar; una orden colgada mas que esto se
-    #: da por perdida en lugar de dejar la pagina esperando para siempre.
-    REPLY_TIMEOUT = 300.0
+    #: el navegador y el proxy puede tardar, y cerrar la sesion incluye el
+    #: analisis estatico (acotado por STATIC_BUDGET_S); con 300 s, un portal
+    #: real se quedaba sin respuesta en la ultima etapa. Una orden colgada mas
+    #: que esto se da por perdida en lugar de dejar la pagina esperando.
+    REPLY_TIMEOUT = 900.0
 
     def __init__(self, bridge: Bridge, host: str = "127.0.0.1", port: int = 0):
         self.bridge = bridge
@@ -201,8 +222,7 @@ class PanelServer:
         self._lock = threading.Lock()
         self._orders: "queue.Queue[_Order]" = queue.Queue()
         handler = type("BoundPanelHandler", (PanelHandler,), {"panel": self})
-        self.httpd = ThreadingHTTPServer((host, port), handler)
-        self.httpd.daemon_threads = True
+        self.httpd = _QuietServer((host, port), handler)
         port = self.port
         self.allowed_hosts = frozenset({f"127.0.0.1:{port}", f"localhost:{port}"})
         self.allowed_origins = frozenset(f"http://{h}" for h in self.allowed_hosts)

@@ -16,6 +16,7 @@ motor de reglas la reporta como ``POTENTIAL``, nunca como hecho observado.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -29,6 +30,11 @@ MAX_ITERATIONS = 8
 
 #: Profundidad maxima de la cadena de llamadas reconstruida para el reporte.
 MAX_CALL_CHAIN = 5
+
+#: Los tipos de nodo que trata `_visit`. Debe coincidir con sus ramas.
+VISITED_TYPES = frozenset({"variable_declarator", "assignment_expression",
+                           "augmented_assignment_expression", "return_statement",
+                           "call_expression"})
 
 PRIVATE_LABELS = frozenset(t.value for t in PRIVATE_TAGS)
 
@@ -318,11 +324,23 @@ class StaticPath:
 # Analisis de un script
 # ----------------------------------------------------------------------
 
+class AnalysisTimeout(Exception):
+    """El script no se termino de analizar dentro de su presupuesto de tiempo.
+
+    No es un fallo del script ni un resultado: es cobertura que falta, y el
+    informe tiene que decirlo como tal. Por eso no hereda de nada que el
+    analizador trate como "error de parseo" y degrade a otra cosa.
+    """
+
+
 class ScriptAnalysis:
     """Analiza un unico script y devuelve las rutas sensibles encontradas."""
 
     def __init__(self, source: bytes, file_label: str, url: str = "",
-                 symbolic: bool = False, tree: Any = None):
+                 symbolic: bool = False, tree: Any = None,
+                 deadline: float | None = None):
+        #: Instante (time.monotonic) a partir del cual se abandona el analisis.
+        self.deadline = deadline
         self.source = source
         self.file_label = file_label
         self.url = url
@@ -349,6 +367,14 @@ class ScriptAnalysis:
         #: (`const t` fuera y `const t` dentro de un try); sin distinguirlos, el
         #: .cer heredaria la procedencia del .key.
         self.block_decls: dict[tuple[int, int], set[str]] = {}
+        #: Union de los nombres de ``block_decls``, para descartar rapido.
+        self._block_names: set[str] = set()
+        #: Cada vuelta del punto fijo vuelve a resolver los mismos nombres y a
+        #: recorrer los mismos cuerpos. En codigo minificado (`e`, `t`
+        #: declarados con let en todos los bloques) eso era la mayor parte del
+        #: tiempo; el arbol no cambia entre vueltas, asi que se calcula una vez.
+        self._bind_cache: dict[tuple[int, str, int, int], str] = {}
+        self._visit_lists: dict[int, list[Any]] = {}
         self.paths: list[StaticPath] = []
         #: Marca de cambio del punto fijo. Una asignacion puede alcanzar el
         #: ambito de otra funcion, asi que la convergencia no puede deducirse
@@ -367,7 +393,7 @@ class ScriptAnalysis:
         # la procedencia de la clave: un falso positivo sobre el envio que todo
         # sitio correcto hace.
         summary = ScriptAnalysis(self.source, self.file_label, self.url,
-                                 symbolic=True, tree=self.tree)
+                                 symbolic=True, tree=self.tree, deadline=self.deadline)
         summary.summarize()
         self.summaries = {i: fn.returns for i, fn in enumerate(summary.functions)}
         self._fixpoint()
@@ -422,8 +448,17 @@ class ScriptAnalysis:
         Si un bloque anidado entre ``node`` y ``fn`` declara ``name`` con
         let/const, la clave lleva ese bloque; si no, es el nombre sin mas.
         """
-        if not self.block_decls or node is None:
+        if not self.block_decls or node is None or name not in self._block_names:
+            # Lo habitual: el nombre no lo declara ningun bloque anidado, y no
+            # hace falta recorrer la cadena de padres.
             return name
+        key = (node.id, name, fn.start, fn.end)
+        cached = self._bind_cache.get(key)
+        if cached is None:
+            cached = self._bind_cache[key] = self._bind_walk(name, node, fn)
+        return cached
+
+    def _bind_walk(self, name: str, node: Any, fn: FunctionInfo) -> str:
         current = node.parent
         while current is not None:
             if current.start_byte == fn.start and current.end_byte == fn.end:
@@ -437,6 +472,7 @@ class ScriptAnalysis:
 
     def _collect_functions(self) -> None:
         self._collect_block_declarations()
+        self._block_names = set().union(*self.block_decls.values()) if self.block_decls else set()
         root = self.tree.root_node
         module = FunctionInfo(name="<module>", node=root, params=[], line=1, is_module=True)
         self.functions.append(module)
@@ -453,17 +489,17 @@ class ScriptAnalysis:
             )
             self.functions.append(info)
 
-        # Relacion de anidamiento: la funcion contenedora mas pequena.
-        ordered = sorted(self.functions, key=lambda f: f.end - f.start)
-        for info in self.functions:
-            if info.is_module:
-                continue
-            for candidate in ordered:
-                if candidate is info:
-                    continue
-                if candidate.start <= info.start and candidate.end >= info.end:
-                    info.parent = candidate
-                    break
+        # Relacion de anidamiento: la funcion contenedora mas pequena. Con una
+        # pila sobre las funciones ordenadas por inicio: comparar cada una con
+        # todas era cuadratico, y en el bundle de un portal real (miles de
+        # funciones) se llevaba la mitad del analisis.
+        stack: list[FunctionInfo] = []
+        for info in sorted(self.functions, key=lambda f: (f.start, -f.end, not f.is_module)):
+            while stack and stack[-1].end < info.end:
+                stack.pop()
+            if not info.is_module and stack:
+                info.parent = stack[-1]
+            stack.append(info)
 
         for position, info in enumerate(self.functions):
             self._index[id(info)] = position
@@ -533,7 +569,10 @@ class ScriptAnalysis:
         for _ in range(MAX_ITERATIONS):
             self._changed = False
             self.param_calls = {}
-            for info in self.functions:
+            for position, info in enumerate(self.functions):
+                if self.deadline is not None and position % 64 == 0 \
+                        and time.monotonic() > self.deadline:
+                    raise AnalysisTimeout(self.file_label)
                 self._analyze_function(info)
             if self._propagate_calls():
                 self._changed = True
@@ -572,17 +611,22 @@ class ScriptAnalysis:
                 fn.variables[param] = seed
                 self._changed = True
 
-        body = parser.field(fn.node, "body") or fn.node
+        nodes = self._visit_lists.get(id(fn))
+        if nodes is None:
+            body = parser.field(fn.node, "body") or fn.node
+            # El cuerpo de una arrow function puede ser la propia expresion
+            # (`x => fetch(url, x)`), asi que se visita ademas de sus hijos.
+            # Solo se guardan los nodos que `_visit` trata: los demas no hacen
+            # nada y eran la mayoria del recorrido.
+            nodes = [n for n in [body, *parser.walk_scoped(body)] if n.type in VISITED_TYPES]
+            self._visit_lists[id(fn)] = nodes
         # Dos pasadas: la segunda recoge usos anteriores a la declaracion
         # (hoisting, bucles) sin necesidad de un analisis de flujo completo.
         # Cada pasada reconstruye calls/sinks para no duplicarlos.
         for _ in range(2):
             fn.calls = []
             fn.sinks = []
-            # El cuerpo de una arrow function puede ser la propia expresion
-            # (`x => fetch(url, x)`), asi que se visita ademas de sus hijos.
-            self._visit(body, fn)
-            for node in parser.walk_scoped(body):
+            for node in nodes:
                 self._visit(node, fn)
 
     def _visit(self, node: Any, fn: FunctionInfo) -> None:

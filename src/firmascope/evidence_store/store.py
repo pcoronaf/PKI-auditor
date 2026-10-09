@@ -285,6 +285,9 @@ class EvidenceStore:
         )
         self.db.commit()
 
+    def request_count(self) -> int:
+        return int(self.db.execute("SELECT COUNT(*) FROM requests").fetchone()[0])
+
     def requests(self) -> list[dict[str, Any]]:
         rows = self.db.execute("SELECT * FROM requests ORDER BY timestamp").fetchall()
         out = []

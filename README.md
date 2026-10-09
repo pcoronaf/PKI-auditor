@@ -424,6 +424,24 @@ los cuatro están cubiertos por pruebas de regresión:
 - El proxy ve lo que pasa por HTTP(S). Un sitio con *certificate pinning*
   rechazará la CA efímera, y ese destino queda sin observar: el reporte lo
   registra como fallo de TLS en lugar de presentarlo como ausencia de tráfico.
+- La instrumentación observa la criptografía de **WebCrypto**. Un portal que
+  descifra y firma con una biblioteca JavaScript (jsrsasign, forge, o un
+  `FielUtil` propio) no expone esas operaciones: FirmaScope ve la lectura del
+  `.key` y la red, pero no la firma, y FS-LOCAL-001 queda `INCONCLUSIVE` en lugar
+  de afirmarla. Es lo que ocurrió en el primer piloto sobre un portal real.
+- El agente marca como contraseña de la clave **todo** campo de tipo contraseña:
+  desde la página no puede saber de qué es. Con la credencial registrada, los
+  sensores que ven el cuerpo deciden: si la contraseña registrada no está en
+  una salida, esa salida no la cuenta FS-PWD-001 (salvo que el dato venga
+  transformado, que podría ocultarla). Para no mezclar la cuenta del portal con
+  la firma, inicie sesión aparte (`firmascope login`).
+- El análisis estático tiene un presupuesto de tiempo (150 s por sesión, 60 s
+  por script), empezando por los scripts que manejan archivos, contraseñas o
+  cripto. Lo que no cabe queda listado como no analizado, y si son justo esos
+  scripts FS-CODE-001 queda `INCONCLUSIVE`, no `NOT_OBSERVED`.
+- Una firma que necesita al servidor (por ejemplo, para pedir el documento en
+  el momento de firmar) se queda esperando con el aislamiento total. Use
+  «Solo terceros»: el portal sigue alcanzable y los demás dominios no.
 
 ---
 

@@ -191,3 +191,53 @@ def test_la_salida_de_material_privado_la_marca_el_nucleo():
     # Leer la clave no es sacarla; enviar la firma tampoco. Un intento
     # bloqueado si cuenta: el sitio lo intento.
     assert marcas == [True, False, False, True]
+
+
+def test_el_contador_de_peticiones_cuenta_lo_que_hay_en_el_expediente(tmp_path):
+    """En el piloto del panel, la interfaz mostraba "0 peticiones" con el portal
+    enviando decenas: el contador no lo incrementaba nadie."""
+    from firmascope.audit_core.config import AuditConfig
+    from firmascope.audit_core.orchestrator import AuditSession
+    from firmascope.evidence_store.store import RequestRecord
+
+    session = AuditSession(AuditConfig(target="https://portal.ejemplo.mx", output_dir=tmp_path))
+    try:
+        for _ in range(3):
+            session.store.add_request(RequestRecord(
+                timestamp=0.0, method="GET", url="https://portal.ejemplo.mx/api",
+                host="portal.ejemplo.mx", registrable="ejemplo.mx"))
+        assert session.live_stats()["requests"] == 3
+    finally:
+        session.store.close()
+        session.vault.destroy()
+
+
+def test_una_pestana_que_se_cierra_no_llena_la_terminal_de_trazas(capsys):
+    """En Windows, cerrar el panel con ordenes en curso imprimia un
+    ConnectionAbortedError por peticion."""
+    import socket
+
+    from firmascope.gui_bridge.panel import PanelHandler
+
+    class Abortada:
+        def write(self, _data):
+            raise ConnectionAbortedError(10053, "conexion abortada")
+
+    handler = PanelHandler.__new__(PanelHandler)
+    handler.wfile = Abortada()
+    handler.request_version = "HTTP/1.1"
+    handler._headers_buffer = []
+    handler.send_response = lambda *a, **k: None
+    handler.send_header = lambda *a, **k: None
+    handler.end_headers = lambda: None
+    handler._send(200, b"{}")          # no lanza
+    server = PanelServer(Bridge())
+    try:
+        try:
+            raise ConnectionAbortedError(10053, "conexion abortada")
+        except ConnectionAbortedError:
+            with socket.socket() as sock:
+                server.httpd.handle_error(sock, ("127.0.0.1", 1))
+    finally:
+        server.httpd.server_close()
+    assert "Traceback" not in capsys.readouterr().err

@@ -272,7 +272,7 @@ class Bridge:
                     "dropped": self.dropped, "warning": f"{type(exc).__name__}: {exc}"}
         return {
             "events": self._take_events(),
-            "stats": session.stats.to_dict(),
+            "stats": session.live_stats(),
             "dropped": self.dropped,
             "network": session.controller.isolation.network_state
             if session.controller.isolation else "",
