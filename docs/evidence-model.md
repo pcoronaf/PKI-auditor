@@ -115,3 +115,26 @@ prueba de contenido para esas peticiones.
 Un sensor ausente no produce hallazgos vacíos. Produce preguntas sin responder,
 y el reporte las nombra en lugar de dejar un silencio que se leería como
 tranquilidad.
+
+---
+
+## La interfaz gráfica y el expediente
+
+La ventana de Tauri no escribe en el expediente ni decide nada sobre él. Lanza
+el núcleo como proceso hijo y le pasa mensajes por stdio; todo lo que acaba en
+`session.sqlite` lo escribe el mismo código que usa la CLI.
+
+Eso importa para la integridad de la cadena. Los sensores producen en hilos y
+callbacks distintos, pero **sólo el hilo principal escribe**, y es la interfaz
+quien decide cuándo con el comando `poll`. Si la interfaz empujara eventos desde
+otro hilo, el orden de la cadena dependería de una carrera entre sensores y dos
+ejecuciones idénticas darían cadenas distintas.
+
+También fija qué puede afirmar la interfaz: lo que muestra es lo que el núcleo
+concluyó, no una segunda lectura de los mismos hechos. Una interfaz con criterio
+propio tendría **dos verdades** sobre la misma auditoría, y la que viera el
+operador no sería necesariamente la que quedara firmada en el expediente.
+
+Cerrar la ventana no pierde la auditoría: el `shutdown` del puente cierra la
+sesión como una cancelación —red restablecida, expediente escrito con lo
+observado hasta ese punto— igual que `cancel` en la CLI.

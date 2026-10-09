@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FirmaScope</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>FirmaScope</h1>
+  <p class="sub" id="subtitle">Auditor de custodia de claves privadas</p>
+  <p class="version" id="version"></p>
+</header>
+
+<main>
+  <!-- Arranque: fallo al hablar con el nucleo -->
+  <section id="view-error" hidden>
+    <div class="card bad">
+      <h2>No se pudo iniciar el nucleo</h2>
+      <p id="error-detail"></p>
+      <button data-action="retry-hello">Reintentar</button>
+    </div>
+  </section>
+
+  <!-- Configuracion: se pinta desde el esquema del nucleo -->
+  <section id="view-setup" hidden>
+    <div class="card">
+      <h2>Configurar la auditoria</h2>
+      <p class="sub">Puede dejar el sitio vacio: podra abrir la pagina una vez
+      iniciada la sesion.</p>
+      <form id="setup-form" autocomplete="off"></form>
+      <details id="advanced-wrap">
+        <summary>Opciones avanzadas</summary>
+        <div id="setup-advanced"></div>
+      </details>
+      <div id="setup-problems" class="problems" hidden></div>
+      <div class="actions">
+        <button id="start" data-action="start" class="primary">Iniciar auditoria</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Confirmacion de credencial real -->
+  <section id="view-consent" hidden>
+    <div class="card bad">
+      <h2>Uso de su e.firma real</h2>
+      <ul id="consent-warnings"></ul>
+      <p>Escriba <code>ACEPTO</code> para continuar.</p>
+      <input type="text" id="consent-input" autocomplete="off" spellcheck="false">
+      <div class="actions">
+        <button data-action="consent-cancel">Cancelar</button>
+        <button data-action="consent-ok" class="danger">Continuar</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Sesion en marcha -->
+  <section id="view-session" hidden>
+    <div class="card" id="stage-card">
+      <div class="stage-head">
+        <h2 id="stage-title">—</h2>
+        <span class="pill" id="stage-network">—</span>
+      </div>
+      <p id="stage-instruction"></p>
+      <p class="warn" id="stage-note" hidden></p>
+      <ol class="stages" id="stage-list"></ol>
+      <div class="actions">
+        <button data-action="next" class="primary">Siguiente</button>
+        <button data-action="back">Regresar</button>
+        <button data-action="retry">Repetir</button>
+        <button data-action="cancel" class="danger">Cancelar proceso</button>
+      </div>
+    </div>
+
+    <div class="card" id="credential-card" hidden>
+      <h3>Credencial de laboratorio</h3>
+      <p class="sub">Use estos archivos en el portal. No son del SAT.</p>
+      <dl class="kv" id="credential-info"></dl>
+    </div>
+
+    <div class="card">
+      <h3>Pagina</h3>
+      <div class="row">
+        <input type="text" id="url-input" placeholder="portal.ejemplo.mx"
+               autocomplete="off" spellcheck="false">
+        <button data-action="navigate">Abrir</button>
+      </div>
+      <div class="row">
+        <button data-action="offline">Cortar la red</button>
+        <button data-action="online">Restablecer la red</button>
+        <button data-action="live">Opciones en marcha</button>
+      </div>
+      <p class="sub" id="session-status"></p>
+    </div>
+
+    <div class="card">
+      <h3>Observado en vivo</h3>
+      <div class="feed" id="feed"></div>
+    </div>
+  </section>
+
+  <!-- Opciones modificables en marcha -->
+  <section id="view-live" hidden>
+    <div class="card">
+      <h2>Opciones modificables en marcha</h2>
+      <p class="sub">Lo que no aparece aqui cambiaria el significado de lo ya
+      registrado: exige una sesion nueva.</p>
+      <form id="live-form" autocomplete="off"></form>
+      <div class="actions">
+        <button data-action="live-close">Volver</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Resultado -->
+  <section id="view-report" hidden>
+    <div class="card">
+      <h2>Resultado de la auditoria</h2>
+      <dl class="kv" id="report-meta"></dl>
+      <div id="report-sensors"></div>
+    </div>
+    <div class="card">
+      <h3>Localidad del procesamiento</h3>
+      <table id="report-locality"><tbody></tbody></table>
+    </div>
+    <div id="report-findings"></div>
+    <div class="card">
+      <p class="sub">El expediente completo esta en <code id="report-path"></code>.
+      <strong>No observado no equivale a imposible.</strong></p>
+      <div class="actions">
+        <button data-action="new-session" class="primary">Nueva auditoria</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

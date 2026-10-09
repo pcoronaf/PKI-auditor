@@ -1,0 +1,131 @@
+/* Interfaz sobria a proposito: una herramienta que emite afirmaciones sobre la
+   clave de alguien no deberia parecer un panel de marketing. Alto contraste,
+   sin animaciones que distraigan de lo que se esta leyendo. */
+:root {
+  --bg: #11141a;
+  --card: #1a1f27;
+  --line: #2b323d;
+  --fg: #e8ecf3;
+  --muted: #98a3b3;
+  --accent: #569cd6;
+  --ok: #4ec9b0;
+  --warn: #d7ba7d;
+  --bad: #f07178;
+  --crit: #ff5370;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f6f9; --card: #ffffff; --line: #d8dee9; --fg: #1a1f27;
+    --muted: #5a6474; --accent: #1f6fb2;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header { padding: 18px 22px 10px; border-bottom: 1px solid var(--line); }
+h1 { margin: 0; font-size: 20px; letter-spacing: .2px; }
+h2 { margin: 0 0 6px; font-size: 16px; }
+h3 { margin: 0 0 6px; font-size: 14px; color: var(--muted);
+     text-transform: uppercase; letter-spacing: .6px; }
+.sub { margin: 4px 0; color: var(--muted); font-size: 13px; }
+.version { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+main { padding: 16px 22px 48px; max-width: 900px; }
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+  padding: 16px; margin-bottom: 14px;
+}
+.card.bad { border-color: var(--bad); }
+code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; }
+
+/* Campos */
+label.field { display: block; margin: 12px 0 0; }
+label.field > .name { display: block; font-weight: 600; margin-bottom: 2px; }
+label.field > .help { display: block; color: var(--muted); font-size: 12.5px;
+                      margin-bottom: 5px; }
+input[type=text], input[type=password], select {
+  width: 100%; padding: 7px 9px; border-radius: 5px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  font: inherit;
+}
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.choices { display: grid; gap: 6px; margin-top: 4px; }
+.choice { display: flex; gap: 8px; align-items: flex-start;
+          padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.choice.danger { border-color: var(--bad); }
+.choice input { width: auto; margin-top: 3px; }
+.choice .label { font-weight: 600; }
+.choice .note { color: var(--muted); font-size: 12.5px; }
+.checkbox { display: flex; gap: 8px; align-items: flex-start; margin-top: 12px; }
+.checkbox input { width: auto; margin-top: 3px; }
+
+/* Botones */
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+button {
+  padding: 7px 13px; border-radius: 5px; border: 1px solid var(--line);
+  background: var(--card); color: var(--fg); font: inherit; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #0b0e13; font-weight: 600; }
+button.danger { border-color: var(--bad); color: var(--bad); }
+
+/* Etapas */
+.stage-head { display: flex; align-items: baseline; gap: 10px; }
+.pill { padding: 2px 9px; border-radius: 99px; font-size: 12px; font-weight: 700;
+        border: 1px solid var(--line); }
+.pill.OFFLINE { color: var(--warn); border-color: var(--warn); }
+.pill.ONLINE { color: var(--ok); border-color: var(--ok); }
+ol.stages { list-style: none; padding: 0; margin: 12px 0 0;
+            display: grid; gap: 3px; }
+ol.stages li { display: flex; gap: 9px; color: var(--muted); font-size: 13px; }
+ol.stages li.current { color: var(--fg); font-weight: 600; }
+ol.stages li .net { font-size: 11px; opacity: .8; }
+.warn { color: var(--warn); }
+.problems { margin-top: 12px; padding: 10px 12px; border-radius: 6px;
+            border: 1px solid var(--bad); color: var(--bad); font-size: 13px; }
+.problems ul { margin: 4px 0 0; padding-left: 18px; }
+
+/* Feed */
+.feed { max-height: 230px; overflow-y: auto; font-family: ui-monospace, Menlo, monospace;
+        font-size: 12px; display: grid; gap: 2px; }
+.feed .ev { display: grid; grid-template-columns: 170px 1fr auto; gap: 8px; }
+.feed .ev .t { color: var(--accent); }
+.feed .ev .d { color: var(--muted); overflow: hidden; text-overflow: ellipsis;
+               white-space: nowrap; }
+.feed .ev .g { color: var(--warn); }
+.feed .ev.blocked .d { color: var(--ok); }
+.feed .empty { color: var(--muted); font-family: inherit; }
+
+/* Reporte */
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 8px 0 0; }
+dl.kv dt { color: var(--muted); }
+dl.kv dd { margin: 0; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+table td { padding: 4px 6px; border-bottom: 1px solid var(--line); }
+table td:last-child { text-align: right; font-weight: 600; }
+.finding { border-left: 3px solid var(--line); padding-left: 12px; margin-bottom: 12px; }
+.finding h4 { margin: 0 0 2px; font-size: 14px; }
+.finding .badge { display: inline-block; padding: 1px 7px; border-radius: 4px;
+                  font-size: 11px; font-weight: 700; margin-right: 7px; }
+.finding.CONFIRMED { border-left-color: var(--crit); }
+.finding.CONFIRMED .badge, .finding.OBSERVED .badge { background: var(--crit); color: #fff; }
+.finding.OBSERVED { border-left-color: var(--crit); }
+.finding.POTENTIAL { border-left-color: var(--warn); }
+.finding.POTENTIAL .badge { background: var(--warn); color: #11141a; }
+.finding.NOT_OBSERVED { border-left-color: var(--ok); }
+.finding.NOT_OBSERVED .badge { background: var(--ok); color: #11141a; }
+.finding.INCONCLUSIVE .badge { background: var(--muted); color: #11141a; }
+.finding details { margin-top: 5px; }
+.finding pre { white-space: pre-wrap; font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+
+/* Aviso flotante */
+#toast {
+  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+  background: var(--card); border: 1px solid var(--accent); color: var(--fg);
+  padding: 9px 16px; border-radius: 6px; max-width: 80%; font-size: 13px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.35);
+}
+#toast.bad { border-color: var(--bad); color: var(--bad); }

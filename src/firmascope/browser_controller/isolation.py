@@ -484,65 +484,134 @@ class StagedOfflineTest:
         self.current_index = 0
 
     # ------------------------------------------------------------------
-    def run(self, on_stage: StageController) -> StagedResult:
-        """Recorre las etapas delegando la decision en ``on_stage``."""
-        reached: list[str] = []
-        index = 0
-        aborted = False
-        abort_reason = ""
+    # Avance paso a paso
+    # ------------------------------------------------------------------
+    #
+    # Hay dos formas de recorrer las etapas y las dos usan la misma maquina:
+    #
+    # * :meth:`run` empuja -- llama a quien decide y espera la respuesta. Es lo
+    #   que necesita una CLI, que bloquea en ``input()``.
+    # * :meth:`begin` y :meth:`apply` tiran -- quien decide pregunta en que
+    #   etapa esta y luego envia la accion. Es lo que necesita una interfaz
+    #   grafica, que no puede bloquear su bucle de eventos esperando un clic.
+    #
+    # Lo importante es que el orden de las etapas, la reconciliacion de la red y
+    # la salida segura viven en un solo sitio. Si la interfaz grafica tuviera su
+    # propio bucle, "cancelar" podria dejar el navegador aislado en un camino y
+    # no en el otro.
 
-        while 0 <= index < len(self.stages):
-            stage = self.stages[index]
-            self.current_index = index
-            self._enter(stage, index)
-            if stage.name not in reached:
-                reached.append(stage.name)
-            entered_at = time.time()
+    def begin(self) -> Stage:
+        """Entra en la primera etapa y la devuelve. Para el modo paso a paso."""
+        self._reached: list[str] = []
+        self._aborted = False
+        self._abort_reason = ""
+        self._index = 0
+        self._entered_at = 0.0
+        self._finished = False
+        return self._enter_step(0)
 
-            try:
-                action = on_stage(stage, index, self)
-            except KeyboardInterrupt:
-                action = StageAction.ABORT
-                abort_reason = "interrumpido por el operador"
-            except Exception as exc:
-                action = StageAction.ABORT
-                abort_reason = f"error en el controlador de etapa: {exc}"
+    @property
+    def finished(self) -> bool:
+        return bool(getattr(self, "_finished", False))
 
-            if not isinstance(action, StageAction):
-                action = StageAction.parse(str(action))
+    def current(self) -> Stage | None:
+        """Etapa actual, o ``None`` si el recorrido ya termino."""
+        if self.finished or not 0 <= self.current_index < len(self.stages):
+            return None
+        return self.stages[self.current_index]
 
-            self.history.append(StageRecord(
-                stage=stage.name, index=index, action=action.value,
-                entered_at=entered_at, left_at=time.time(),
-                network=self.isolation.network_state,
-            ))
-            self._emit_transition(stage, index, action)
+    def apply(self, action: StageAction | str,
+              reason: str = "") -> Stage | None:
+        """Aplica una accion y devuelve la etapa siguiente, o ``None`` al terminar.
 
-            if action is StageAction.ABORT:
-                aborted = True
-                abort_reason = abort_reason or "cancelado por el operador"
-                break
-            if action is StageAction.RETRY:
-                continue
-            if action is StageAction.BACK:
-                index = self._previous_index(index)
-                continue
-            index += 1
+        Es el mismo cuerpo que ejecuta :meth:`run` en cada vuelta: registra la
+        transicion, decide el indice siguiente y, si el recorrido acaba,
+        restablece la red.
+        """
+        if self.finished:
+            return None
+        if not isinstance(action, StageAction):
+            action = StageAction.parse(str(action))
 
+        index = self._index
+        stage = self.stages[index]
+        self.history.append(StageRecord(
+            stage=stage.name, index=index, action=action.value,
+            entered_at=self._entered_at, left_at=time.time(),
+            network=self.isolation.network_state,
+        ))
+        self._emit_transition(stage, index, action)
+
+        if action is StageAction.ABORT:
+            self._aborted = True
+            self._abort_reason = reason or "cancelado por el operador"
+            return self._close_steps()
+        if action is StageAction.RETRY:
+            return self._enter_step(index)
+        if action is StageAction.BACK:
+            return self._enter_step(self._previous_index(index))
+
+        following = index + 1
+        if following >= len(self.stages):
+            return self._close_steps()
+        return self._enter_step(following)
+
+    def result(self) -> StagedResult:
+        """Resultado del recorrido, valido una vez terminado."""
+        completed = (not getattr(self, "_aborted", False)
+                     and getattr(self, "_index", 0) >= len(self.stages) - 1
+                     and self.finished)
+        return StagedResult(
+            completed=completed,
+            aborted=bool(getattr(self, "_aborted", False)),
+            history=list(self.history),
+            reached=list(getattr(self, "_reached", [])),
+            abort_reason=str(getattr(self, "_abort_reason", "")),
+        )
+
+    def _enter_step(self, index: int) -> Stage:
+        stage = self.stages[index]
+        self._index = index
+        self.current_index = index
+        self._enter(stage, index)
+        if stage.name not in self._reached:
+            self._reached.append(stage.name)
+        self._entered_at = time.time()
+        return stage
+
+    def _close_steps(self) -> None:
+        """Cierre comun: red restablecida y evento de fin."""
+        self._finished = True
+        self._index = len(self.stages)
         # Salida segura: suceda lo que suceda, la red queda restablecida.
         self.isolation.reconcile(
-            "ONLINE", "fin de la prueba por etapas" if not aborted else "proceso cancelado")
-
-        result = StagedResult(
-            completed=not aborted and index >= len(self.stages),
-            aborted=aborted,
-            history=list(self.history),
-            reached=reached,
-            abort_reason=abort_reason,
-        )
+            "ONLINE",
+            "proceso cancelado" if self._aborted else "fin de la prueba por etapas")
         self.emit(Event(EventType.CHECKPOINT, self.session_id, sensor="isolation",
-                        data={"name": "staged-test-end", **result.to_dict()}))
-        return result
+                        data={"name": "staged-test-end", **self.result().to_dict()}))
+        return None
+
+    # ------------------------------------------------------------------
+    def run(self, on_stage: StageController) -> StagedResult:
+        """Recorre las etapas delegando la decision en ``on_stage``.
+
+        Es el modo de empuje, sobre la misma maquina paso a paso: lo unico que
+        anade es el bucle que pregunta y la traduccion de las excepciones del
+        controlador en una cancelacion.
+        """
+        stage = self.begin()
+        while stage is not None:
+            reason = ""
+            try:
+                action = on_stage(stage, self.current_index, self)
+            except KeyboardInterrupt:
+                action = StageAction.ABORT
+                reason = "interrumpido por el operador"
+            except Exception as exc:
+                action = StageAction.ABORT
+                reason = f"error en el controlador de etapa: {exc}"
+            stage = self.apply(action, reason)
+        return self.result()
 
     # ------------------------------------------------------------------
     def _previous_index(self, index: int) -> int:

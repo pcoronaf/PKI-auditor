@@ -15,9 +15,10 @@ Y distingue rigurosamente entre **“no observé transmisión de la clave”** y
 **“la clave no puede transmitirse”**. Los reportes son conservadores,
 reproducibles y basados en evidencia.
 
-> **Estado: funcional, verificado contra el laboratorio.** Las seis pruebas
-> TC-001..TC-006 se ejecutan con un Chromium real y comparan cada hallazgo con
-> la verdad conocida del laboratorio. Ver
+> **Estado: completo y verificado contra el laboratorio.** Las pruebas
+> TC-001..TC-007 se ejecutan con un Chromium real y comparan cada hallazgo con
+> la verdad conocida del laboratorio; la interfaz gráfica se prueba contra el
+> núcleo de verdad. Ver
 > [Estado de implementación](#estado-de-implementación).
 
 Licencia: Apache-2.0.
@@ -71,6 +72,24 @@ sigue siendo evidencia de lo observado hasta ese punto, y se cierra como tal.
 El estado de red se **reconcilia desde la etapa**, no se aplica como un cambio
 incremental. Retroceder desde una etapa aislada restablece la red sin
 contabilidad adicional, y la sesión nunca termina dejando el navegador aislado.
+
+### Interfaz gráfica
+
+```bash
+cd gui/src-tauri && cargo build --release
+FIRMASCOPE_PYTHONPATH=../../src ./target/release/firmascope-gui
+```
+
+La ventana es un **panel de control** junto al navegador auditado: dice en qué
+etapa está, qué se ha observado y qué se concluye. El operador carga su `.key` y
+firma en el Chromium instrumentado, no en la interfaz — si la interfaz rellenara
+el formulario, estaría auditando un flujo que no es el que seguirá un usuario.
+
+La interfaz no decide nada: pinta el mismo esquema de opciones que el asistente
+de la CLI, y el núcleo valida. Habla con él por **JSON por línea sobre stdio**,
+no por un puerto local: FirmaScope maneja la e.firma del operador, y un puerto
+abierto es alcanzable por cualquier página que el usuario tenga abierta en
+cualquier navegador. Detalles en [`gui/README.md`](gui/README.md).
 
 ### Credencial de prueba o credencial real
 
@@ -188,8 +207,10 @@ sobre el contenido.
 ## Arquitectura
 
 ```text
-                       CLI / UI
-                          |
+            CLI (asistente)   GUI (Tauri)
+                    \            /
+                     \  JSON/stdio
+                      \        /
                   Audit Orchestrator
       Session Manager  Correlation Engine  Rule Engine
       Evidence Store   Report Generator
@@ -219,6 +240,7 @@ un *workspace* multi-paquete sin ganar acoplamiento:
 | `packages/evidence-store` | `firmascope.evidence_store` |
 | `packages/report-engine` | `firmascope.report_engine` |
 | `apps/cli` | `firmascope.cli` |
+| `apps/gui` | `gui/` (Tauri) + `firmascope.gui_bridge` |
 
 Otras desviaciones deliberadas respecto de la especificación:
 
@@ -253,12 +275,12 @@ Otras desviaciones deliberadas respecto de la especificación:
 | CLI con asistente interactivo | implementado |
 | Addon de mitmproxy (interceptación TLS, nivel 4) | implementado |
 | Aplicaciones de laboratorio (5, con lógica) | implementado |
-| Pruebas TC-001..TC-007 + unitarias (57) | implementado |
-| Interfaz gráfica (Tauri) | **pendiente** |
+| Interfaz gráfica (Tauri) | implementado |
+| Pruebas TC-001..TC-007, GUI y unitarias (72) | implementado |
 
 ```bash
 pip install -e ".[proxy,dev]"
-PYTHONPATH=src python3 -m pytest tests/ -q                # 57 pruebas
+PYTHONPATH=src python3 -m pytest tests/ -q                # 72 pruebas
 PYTHONPATH=src python3 -m pytest tests/ -q -m "not e2e"   # sin navegador
 ```
 
@@ -271,8 +293,8 @@ que dice «la clave salió» es correcto sólo si el recolector la tiene; uno qu
 dice «se impidió» es correcto sólo si no la tiene. Esa comparación con la verdad
 conocida es lo que separa una prueba de una ilusión.
 
-Ejecutar la herramienta por primera vez encontró tres defectos que el diseño no
-revelaba, y los tres están cubiertos por pruebas de regresión:
+Ejecutar la herramienta encontró cuatro defectos que el diseño no revelaba, y
+los cuatro están cubiertos por pruebas de regresión:
 
 1. **Un intento bloqueado se reportaba como clave enviada.** Una misma petición
    la ven varios sensores y sólo el aislamiento sabe que la abortó. Con una
@@ -287,6 +309,12 @@ revelaba, y los tres están cubiertos por pruebas de regresión:
    CDP entrega ese cuerpo vacío, tampoco había forma de probarlo por contenido.
    Lo primero se corrigió en la instrumentación y el análisis estático; lo
    segundo es lo que resuelve el proxy.
+
+4. **La interfaz no pintaba el reporte al terminar.** Una acción de etapa que
+   cierra el recorrido llama a `finish` dentro de sí misma, y el bloqueo de
+   botones usaba una bandera en lugar de contar anidamientos: la llamada
+   interior se descartaba en silencio. La auditoría terminaba bien y el
+   expediente quedaba escrito, pero el operador no veía nada.
 
 ### Límites conocidos
 
@@ -312,6 +340,8 @@ revelaba, y los tres están cubiertos por pruebas de regresión:
   cómo escribir una nueva y cómo elegir el estado de conclusión.
 - [`docs/real-credentials.md`](docs/real-credentials.md) — procedimiento, riesgos
   residuales y qué hacer si el hallazgo confirma la fuga.
+- [`gui/README.md`](gui/README.md) — interfaz gráfica, el protocolo del puente y
+  por qué el canal es stdio y no un puerto.
 
 ### Laboratorio
 

@@ -14,3 +14,10 @@ fixtures/synthetic-efirma/*.key
 fixtures/synthetic-efirma/*.cer
 fixtures/synthetic-efirma/*.json
 node_modules/
+
+# Rust / Tauri
+gui/src-tauri/target/
+gui/src-tauri/gen/
+# Cargo.lock SI se versiona: es una aplicacion, no una biblioteca, y en una
+# herramienta de seguridad el arbol exacto de dependencias es parte de lo que un
+# revisor debe poder reproducir.
