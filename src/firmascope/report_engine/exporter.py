@@ -88,15 +88,9 @@ def build_report(store: EvidenceStore, config: AuditConfig, session_id: str,
     from ..browser_controller.isolation import processing_locality
     from ..rule_engine.context import AuditContext
 
-    events = store.events()
-    requests = store.requests()
-    scripts = store.scripts()
     findings = store.findings()
-
-    context = AuditContext(
-        config=config, events=events, requests=requests, scripts=scripts,
-        checkpoints=store.checkpoints(), static=static_report,
-    )
+    context = AuditContext.from_store(store, config, static=static_report, credential=credential)
+    events, requests, scripts = context.events, context.requests, context.scripts
     offline_windows = context.offline_windows()
     third_parties = context.third_parties_after_key_access()
     names = context.third_party_names()
@@ -125,7 +119,10 @@ def build_report(store: EvidenceStore, config: AuditConfig, session_id: str,
             "findings": len(findings),
             "offline_windows": len(offline_windows),
         },
-        "processing_locality": processing_locality(events, offline_windows),
+        # La contrasena de la cuenta del portal no es "acceso a la contrasena"
+        # de la e.firma: mismo criterio que las reglas.
+        "processing_locality": processing_locality(
+            [e for e in events if not context.is_other_password_read(e)], offline_windows),
         "isolation": isolation or {},
         # Que sensores estuvieron activos acota lo que el expediente puede
         # afirmar. Sin proxy, un cuerpo que el navegador no entrego no se pudo

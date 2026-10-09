@@ -155,9 +155,24 @@ class AuditCredential:
         return dict(self.fingerprints)
 
 
+#: Formatos del ``.key`` sintetico. "sat" es el de una e.firma real (PBES2,
+#: PBKDF2-HMAC-SHA1, 3DES); "aes" el que escribe ``cryptography`` por omision
+#: (PBKDF2-HMAC-SHA256, AES-256), que algunas bibliotecas FIEL no leen.
+KEY_FORMATS = ("sat", "aes")
+
+
 def generate(key_size: int = 2048, password: str | None = None,
-             rfc: str = "FSCO000000XX0", days: int = 365) -> "AuditCredential":
-    """Genera una credencial sintetica completa."""
+             rfc: str = "FSCO000000XX0", days: int = 365,
+             key_format: str = "sat") -> "AuditCredential":
+    """Genera una credencial sintetica completa.
+
+    Por omision el ``.key`` tiene el cifrado de una e.firma del SAT: es lo que
+    esperan los portales. Con AES, jsrsasign (hasta la version 8) lanza "this
+    only supports TripleDES", y el portal del primer piloto se quedaba cargando
+    en lugar de llegar a firmar.
+    """
+    if key_format not in KEY_FORMATS:
+        raise ValueError(f"formato de llave desconocido: {key_format!r} ({', '.join(KEY_FORMATS)})")
     password = password or generate_password()
     key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
 
@@ -195,16 +210,21 @@ def generate(key_size: int = 2048, password: str | None = None,
         .sign(key, hashes.SHA256())
     )
 
-    key_der = key.private_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.BestAvailableEncryption(password.encode("utf-8")),
-    )
     key_plain_der = key.private_bytes(
         encoding=serialization.Encoding.DER,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     )
+    if key_format == "sat":
+        from .sat_format import encrypt_pkcs8_sat
+
+        key_der = encrypt_pkcs8_sat(key_plain_der, password)
+    else:
+        key_der = key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.BestAvailableEncryption(password.encode("utf-8")),
+        )
     public_der = key.public_key().public_bytes(
         encoding=serialization.Encoding.DER,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,

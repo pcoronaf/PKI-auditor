@@ -576,10 +576,16 @@ function renderStage() {
   });
 
   document.querySelector('[data-action="back"]').disabled = !stage.allow_back;
-  // La credencial solo hace falta en la etapa de firma: antes distrae, y
-  // despues ya no aporta.
-  $('credential-card').hidden = !(stage.name === 'sign'
-    && state.credential && state.credential.synthetic);
+  // En la ultima etapa el boton ya no lleva a otra etapa: cierra la sesion,
+  // analiza y escribe el expediente. Llamarlo "Siguiente" no decia eso.
+  document.querySelector('[data-action="next"]').textContent =
+    stage.index === stage.total - 1 ? 'Finalizar y generar reporte' : 'Siguiente';
+  // La credencial queda a la vista toda la sesion: en el piloto, el operador
+  // volvio atras a repetir la firma y ya no tenia la ruta ni la contrasena.
+  // En la etapa de firma se resalta, que es cuando se usa.
+  const card = $('credential-card');
+  card.hidden = !(state.credential && state.credential.synthetic);
+  card.classList.toggle('focus', stage.name === 'sign');
 }
 
 async function stageAction(action) {

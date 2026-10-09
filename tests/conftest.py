@@ -30,7 +30,9 @@ def credential(tmp_path_factory):
     """Credencial sintetica compartida: generarla cuesta un RSA de 2048."""
     from firmascope.credentials import generate
 
-    cred = generate()
+    # AES: los laboratorios descifran con WebCrypto, y la instrumentacion ve el
+    # descifrado. La llave en formato SAT (3DES, por omision) se prueba aparte.
+    cred = generate(key_format="aes")
     cred.write(tmp_path_factory.mktemp("efirma"))
     return cred
 

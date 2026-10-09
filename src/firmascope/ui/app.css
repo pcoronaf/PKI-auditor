@@ -165,3 +165,6 @@ table td:last-child { text-align: right; font-weight: 600; }
   .row { flex-wrap: wrap; }
   dl.kv { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* La tarjeta de la credencial, resaltada en la etapa de firma. */
+#credential-card.focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }

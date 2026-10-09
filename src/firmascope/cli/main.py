@@ -484,7 +484,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
 def cmd_credentials_new(args: argparse.Namespace) -> int:
     from ..credentials import generate
 
-    credential = generate(password=args.password or None)
+    credential = generate(password=args.password or None, key_format=args.format)
     directory = Path(args.output)
     credential.write(directory, stem=args.stem)
     print("Credencial sintetica de laboratorio:")
@@ -713,6 +713,9 @@ def build_parser() -> argparse.ArgumentParser:
                            help="contrasena fija, para pruebas repetibles")
     creds_new.add_argument("--stem", default="audit",
                            help="nombre base de los archivos (audit.key, audit.cer)")
+    creds_new.add_argument("--format", choices=("sat", "aes"), default="sat",
+                           help="cifrado del .key: sat (3DES, como una e.firma real; por "
+                                "omision) o aes")
     creds_new.set_defaults(func=cmd_credentials_new)
 
     options_cmd = sub.add_parser(

@@ -354,6 +354,10 @@ class AuditConfig:
     #: Segundos por etapa y en la etapa de firma, en modo piloto automatico.
     dwell: float = 3.0
     offline_dwell: float = 4.0
+    #: Cifrado del ``.key`` sintetico: "sat" (3DES, como una e.firma real) o
+    #: "aes". Los laboratorios que ejercitan el descifrado con WebCrypto usan
+    #: "aes"; un portal real necesita "sat".
+    synthetic_key_format: str = "sat"
     #: Sesion autenticada guardada con ``firmascope login``. Es una credencial
     #: de la cuenta del operador: nunca se copia al expediente.
     session_state: Path | None = None

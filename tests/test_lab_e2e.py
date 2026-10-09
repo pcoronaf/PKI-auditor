@@ -257,7 +257,8 @@ def test_el_expediente_es_verificable_y_trae_el_informe(lab, tmp_path, credentia
 # Piloto automatico: la auditoria sin nadie delante
 # ----------------------------------------------------------------------
 
-def run_autopilot(app: str, output_dir, *, isolation: str = "full", session_state=None):
+def run_autopilot(app: str, output_dir, *, isolation: str = "full", session_state=None,
+                  key_format: str = "aes"):
     """Audita sin operador, como `firmascope audit URL --auto --headless`."""
     from firmascope.browser_controller.autopilot import Autopilot
 
@@ -270,6 +271,7 @@ def run_autopilot(app: str, output_dir, *, isolation: str = "full", session_stat
         dwell=1.0,
         offline_dwell=3.0,
         session_state=session_state,
+        synthetic_key_format=key_format,
     )
     session = AuditSession(config)
     pilot = None
@@ -481,3 +483,19 @@ def test_tc012_la_contrasena_de_la_cuenta_no_es_la_de_la_efirma(lab, tmp_path, c
     assert "Otro campo de contrasena" in hallazgo["detail"]
     # Y la firma, que es lo que se audita, sigue siendo local.
     assert status(report, "FS-LOCAL-001") == "CONFIRMED"
+
+
+
+def test_tc013_la_llave_sintetica_tiene_el_formato_del_sat(lab, tmp_path):
+    """El primer piloto en un portal real se quedaba "cargando": su biblioteca
+    FIEL solo lee llaves cifradas con 3DES, como las del SAT, y la sintetica
+    venia en AES. Con el formato del SAT, un sitio que descifra en JavaScript
+    (como cualquier portal real: WebCrypto no tiene 3DES) llega a firmar."""
+    lab.COLLECTED.clear()
+    report, pilot = run_autopilot("demo-safe", tmp_path, key_format="sat")
+
+    assert pilot.signed, f"el sitio no pudo usar la llave en formato SAT: {pilot.notes}"
+    assert not lab.COLLECTED
+    assert status(report, "FS-LOCAL-001") == "CONFIRMED"
+    for regla in ("FS-KEY-001", "FS-PWD-001"):
+        assert status(report, regla) == "NOT_OBSERVED", regla
