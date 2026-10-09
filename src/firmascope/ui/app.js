@@ -482,6 +482,7 @@ async function start() {
     $('subtitle').textContent = started.target || 'sin objetivo: abra una pagina';
     renderCredential();
     renderStage();
+    $('credential-warning').hidden = true;
     show('view-session');
     startPolling();
     toast(`Sesion ${started.session} iniciada`);
@@ -685,6 +686,17 @@ async function poll() {
 
 const feedSeen = { count: 0 };
 function addEvent(event) {
+  // El nucleo avisa si el .key elegido en la pagina no es el de la sesion: en
+  // el piloto del portal real se cargo la e.firma real en modo sintetico y
+  // nada lo advirtio. El aviso se queda fijo; la lista de eventos se desplaza.
+  const data0 = event.data || {};
+  if (event.type === 'CHECKPOINT' && data0.name === 'credential-mismatch') {
+    const box = $('credential-warning');
+    box.textContent = data0.message || 'El .key cargado no es el de la sesion.';
+    box.hidden = false;
+    toast(box.textContent, true);
+    return;
+  }
   // Una salida de material privado se muestra siempre, sea del tipo que sea:
   // es lo unico de la lista que no puede pasar desapercibido.
   const privateEgress = Boolean(event.private_egress);

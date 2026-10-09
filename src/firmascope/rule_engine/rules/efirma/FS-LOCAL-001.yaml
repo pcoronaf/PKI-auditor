@@ -11,6 +11,11 @@ description: |
 
   El resultado se expresa como "firma local demostrada bajo las condiciones
   probadas". El reporte nunca traduce esto a "sitio seguro".
+
+  Solo cuenta el aislamiento total. Con "solo terceros", o con una lista de
+  hosts permitidos, el servidor del sitio sigue alcanzable durante la ventana y
+  una firma completada ahi no demuestra nada sobre donde se firma: la regla
+  queda INCONCLUSIVE.
 rationale: |
   Que la firma se complete sin red establece un hecho fuerte y difícil de
   falsear: la clave privada se usó en el equipo del usuario. Es la evidencia más

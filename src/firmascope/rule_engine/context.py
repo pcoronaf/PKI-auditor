@@ -19,6 +19,7 @@ from ..audit_core.config import AuditConfig
 from ..audit_core.events import (
     EGRESS_EVENTS,
     KEY_ACCESS_EVENTS,
+    foreign_key_digest,
     is_key_access,
     Event,
     EventType,
@@ -58,6 +59,9 @@ class AuditContext:
     #: sirve para descartar: un campo de contrasena cuyo valor nunca llega a esa
     #: longitud no es el de la e.firma. Nunca sale de memoria.
     key_password_length: int | None = None
+    #: SHA-256 del ``.key`` registrado, para reconocer en la pagina otro
+    #: distinto (``foreign_key_selections``). Es un digest, no el secreto.
+    key_sha256: str | None = None
 
     # -- consultas basicas ----------------------------------------------
     def events_of(self, *types: EventType) -> list[Event]:
@@ -79,8 +83,11 @@ class AuditContext:
         reporte listaba dos, porque contaba la contrasena de la cuenta del
         portal como acceso a la clave. Una pieza, una implementacion.
         """
+        import hashlib
+
         vault = getattr(store, "vault", None)
         password = getattr(credential, "password", None)
+        key_der = getattr(credential, "key_der", None)
         return cls(
             config=config,
             events=store.events(),
@@ -90,6 +97,7 @@ class AuditContext:
             static=static,
             canary_labels=vault.labels if vault is not None and vault.alive else set(),
             key_password_length=len(password) if password else None,
+            key_sha256=hashlib.sha256(key_der).hexdigest() if key_der else None,
         )
 
     def __post_init__(self) -> None:
@@ -138,6 +146,23 @@ class AuditContext:
     def _password_field(self, event: Event) -> str:
         return str(event.data.get("input_id") or "")
 
+    # -- credencial en uso ------------------------------------------------
+    def foreign_key_selections(self) -> list[Event]:
+        """Elecciones de un ``.key`` que no es el de la credencial registrada.
+
+        Si las hay, lo que la sesion sabe de la credencial (canarios, longitud
+        de la contrasena) no describe el material que de verdad se uso.
+        """
+        cached = getattr(self, "_foreign_cache", None)
+        if cached is None:
+            cached = [e for e in self.events_of(EventType.FILE_SELECTED)
+                      if foreign_key_digest(e, self.key_sha256)]
+            self._foreign_cache = cached
+        return cached
+
+    def foreign_key_used(self) -> bool:
+        return bool(self.foreign_key_selections())
+
     def other_password_fields(self) -> set[str]:
         """Campos de contrasena cuyo valor nunca tuvo la longitud de la e.firma.
 
@@ -147,7 +172,15 @@ class AuditContext:
         la longitud de su contrasena guarda otra (la de la cuenta del portal).
         Se mira la lectura mas larga de cada campo, porque los frameworks leen
         el valor mientras se escribe.
+
+        Si en la pagina se cargo otro ``.key``, la longitud registrada no es la
+        de la contrasena en uso: en el piloto, la e.firma real (8 caracteres) se
+        descarto por no medir 21 como la sintetica, y el reporte dijo que nadie
+        habia leido la contrasena. Entonces solo se descartan los campos leidos
+        exclusivamente antes de elegir cualquier ``.key`` (el inicio de sesion).
         """
+        if self.foreign_key_used():
+            return self._fields_read_before_key_selection()
         if not self.key_password_length:
             return set()
         longest: dict[str, int] = {}
@@ -163,6 +196,19 @@ class AuditContext:
         return {name for name, size in longest.items()
                 if size != self.key_password_length and name not in unknown}
 
+    def _fields_read_before_key_selection(self) -> set[str]:
+        key_choices = [e.timestamp for e in self.events_of(EventType.FILE_SELECTED)
+                       if Tag.KEY_FILE.value in e.tags]
+        if not key_choices:
+            return set()
+        first_choice = min(key_choices)
+        before: set[str] = set()
+        after: set[str] = set()
+        for event in self.events_of(EventType.PASSWORD_READ):
+            name = self._password_field(event)
+            (before if event.timestamp < first_choice else after).add(name)
+        return {name for name in before - after if name}
+
     def is_other_password_read(self, event: Event) -> bool:
         return (event.type is EventType.PASSWORD_READ
                 and self._password_field(event) in self.other_password_fields())
@@ -177,6 +223,10 @@ class AuditContext:
         """
         value = label.value if isinstance(label, Tag) else str(label)
         if value not in self.canary_labels or self.correlation is None:
+            return False
+        if self.foreign_key_used():
+            # Los canarios son de la credencial registrada, no de la que se uso:
+            # que falten no desmiente nada.
             return False
         if Tag.DERIVED.value in self.event_tags(event):
             return False
@@ -208,13 +258,39 @@ class AuditContext:
             return True
         return bool(self.events_with_tag(Tag.KEY_FILE, Tag.PRIVATE_KEY))
 
+    def password_tag_from_other_field(self, event: Event) -> bool:
+        """La etiqueta KEY_PASSWORD de esta salida solo puede venir de otro campo.
+
+        La etiqueta nace al leer un campo de contrasena; si todas las lecturas
+        anteriores a la salida son de campos que no son el de la e.firma (el
+        inicio de sesion), la contrasena que viaja es esa otra.
+
+        Solo se aplica con una llave ajena: sin canarios de la credencial en
+        uso, el contenido no puede desmentir la etiqueta, y el inicio de sesion
+        volveria a reportarse como "la contrasena de la e.firma salio". Con la
+        credencial registrada decide el contenido, y un dato transformado sigue
+        contando aunque el campo no mida lo esperado.
+        """
+        if not self.foreign_key_used():
+            return False
+        if Tag.KEY_PASSWORD.value not in self.event_tags(event):
+            return False
+        earlier = [e for e in self.events_of(EventType.PASSWORD_READ)
+                   if e.timestamp <= event.timestamp]
+        return bool(earlier) and all(self.is_other_password_read(e) for e in earlier)
+
+    def not_key_password_egress(self, event: Event) -> bool:
+        """Salida etiquetada KEY_PASSWORD que no lleva la contrasena de la e.firma."""
+        return (self.contradicted(event, Tag.KEY_PASSWORD)
+                or self.password_tag_from_other_field(event))
+
     def observed_password(self) -> bool:
         """True si la sesion llego a usar la contrasena de la e.firma."""
         if any(not self.is_other_password_read(e)
                for e in self.events_of(EventType.PASSWORD_READ)):
             return True
         return any(e.type is not EventType.PASSWORD_READ
-                   and not (e.type in EGRESS_EVENTS and self.contradicted(e, Tag.KEY_PASSWORD))
+                   and not (e.type in EGRESS_EVENTS and self.not_key_password_egress(e))
                    for e in self.events_with_tag(Tag.KEY_PASSWORD))
 
     def after_key_access(self, events: Iterable[Event]) -> list[Event]:

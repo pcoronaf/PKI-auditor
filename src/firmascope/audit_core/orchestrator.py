@@ -14,6 +14,7 @@ Invariantes que esta clase garantiza:
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,8 +25,15 @@ from ..credentials import generator as credentials
 from ..evidence_store.store import EvidenceStore, Finding
 from ..instrumentation_agent.loader import agent_sha256
 from .config import AuditConfig, CredentialMode, environment_info
-from .events import Event, EventType
+from .events import Event, EventType, foreign_key_digest
 from .secrets import SecretVault
+
+#: Aviso en vivo cuando el ``.key`` elegido en la pagina no es el de la sesion.
+CREDENTIAL_MISMATCH_WARNING = (
+    "El .key que eligio en la pagina no es el de esta sesion. FirmaScope no conoce su "
+    "contrasena: no la protege en el expediente ni la busca en lo que sale. Si es su "
+    "e.firma real, cancele y repita la auditoria en modo credencial real."
+)
 
 
 def new_session_id(output_dir: Path, now: time.struct_time | None = None) -> str:
@@ -127,10 +135,41 @@ class AuditSession:
 
         credential.register(self.vault)
         self.credential = credential
+        self._watch_key_choice()
         self.emit(Event(EventType.CHECKPOINT, self.session_id, sensor="orchestrator",
                         data={"name": "credentials", "mode": mode.value,
                               **credential.describe(self.config.privacy)}))
         return credential
+
+    def _watch_key_choice(self) -> None:
+        """Avisa en vivo si en la pagina se elige un ``.key`` que no es el registrado.
+
+        En el piloto del portal real, la sesion estaba en modo sintetico y el
+        operador cargo su e.firma: la contrasena real no estaba protegida en el
+        vault y nada lo dijo hasta leer el expediente. El aviso queda en la
+        cadena de evidencias y la interfaz lo muestra fijo. Se compara con la
+        credencial vigente al llegar el evento, no con la de este momento: las
+        pruebas, y quien la sustituya, registran otra despues.
+        """
+        if getattr(self, "_key_watch", False):
+            return
+        self._key_watch = True
+        seen: set[str] = set()
+
+        def check(event: Event) -> None:
+            if event.type is not EventType.FILE_SELECTED or self.credential is None:
+                return
+            registered = hashlib.sha256(self.credential.key_der).hexdigest()
+            digest = foreign_key_digest(event, registered)
+            if not digest or digest in seen:
+                return
+            seen.add(digest)
+            self.emit(Event(EventType.CHECKPOINT, self.session_id, sensor="orchestrator",
+                            data={"name": "credential-mismatch",
+                                  "mode": self.config.credential_mode.value,
+                                  "message": CREDENTIAL_MISMATCH_WARNING}))
+
+        self.store.subscribe(check)
 
     # ------------------------------------------------------------------
     # Navegador

@@ -24,7 +24,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Sequence
 
 from ..audit_core.config import AuditConfig, IsolationMode, IsolationPolicy
@@ -429,12 +429,35 @@ ONLINE_STAGES: tuple[Stage, ...] = (
 )
 
 
+#: Con aislamiento parcial ("solo terceros", o una lista de permitidos) el
+#: servidor del portal sigue alcanzable. "Firmar con la red aislada ... la
+#: operacion es local" era falso: en el piloto del portal real el operador firmo
+#: en esa etapa mientras el portal hablaba con su servidor.
+PARTIAL_STAGES: tuple[Stage, ...] = (
+    DEFAULT_STAGES[0],
+    DEFAULT_STAGES[1],
+    replace(DEFAULT_STAGES[2], title="Aislar a los terceros",
+            instruction="FirmaScope corta la salida hacia los destinos no permitidos. "
+                        "El servidor del portal sigue alcanzable."),
+    replace(DEFAULT_STAGES[3], title="Firmar sin terceros",
+            instruction="Cargue el .cer, el .key y la contrasena, y pulse firmar. El "
+                        "servidor del portal sigue alcanzable: esta etapa muestra que "
+                        "intenta salir hacia otros destinos, pero no prueba que la "
+                        "firma sea local."),
+    replace(DEFAULT_STAGES[4], title="Quitar el aislamiento",
+            instruction="Se devuelve la conectividad con todos los destinos."),
+    DEFAULT_STAGES[5],
+)
+
+
 def stages_for(config: Any) -> list[Stage]:
     """Las etapas que corresponden a la configuracion de la sesion."""
     from ..audit_core.config import IsolationMode
 
     if config.offline_test and config.isolation.mode is not IsolationMode.NONE:
-        return list(DEFAULT_STAGES)
+        if config.isolation.is_total():
+            return list(DEFAULT_STAGES)
+        return list(PARTIAL_STAGES)
     return list(ONLINE_STAGES)
 
 
@@ -717,11 +740,14 @@ LOCALITY_MILESTONES: tuple[tuple[str, tuple[EventType, ...]], ...] = (
 
 
 def processing_locality(events: Iterable[Event],
-                        offline_windows: Sequence[tuple[float, float | None]]) -> dict[str, str]:
+                        offline_windows: Sequence[tuple[float, float | None]],
+                        isolated_label: str = "OFFLINE") -> dict[str, str]:
     """Tabla ``hito -> ONLINE | OFFLINE | NOT OBSERVED`` de la especificacion.
 
     Para cada hito se toma el **primer** evento que lo representa y se mira si
-    cayo dentro de una ventana de aislamiento.
+    cayo dentro de una ventana de aislamiento. Lo ocurrido dentro de la ventana
+    se nombra con ``isolated_label`` (``IsolationPolicy.window_label``): con
+    "solo terceros" no es OFFLINE, el servidor del portal seguia alcanzable.
     """
 
     def offline_at(ts: float) -> bool:
@@ -743,5 +769,5 @@ def processing_locality(events: Iterable[Event],
             report[label] = "NOT OBSERVED"
             continue
         first = min(candidates, key=lambda e: e.timestamp)
-        report[label] = "OFFLINE" if offline_at(first.timestamp) else "ONLINE"
+        report[label] = isolated_label if offline_at(first.timestamp) else "ONLINE"
     return report

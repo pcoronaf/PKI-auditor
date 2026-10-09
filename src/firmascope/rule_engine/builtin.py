@@ -272,10 +272,15 @@ def key_derived_transmitted(context: AuditContext, meta) -> RuleResult:
 def _other_password_note(context: AuditContext, contradicted: Sequence[Event]) -> str:
     if not contradicted:
         return ""
+    if any(context.contradicted(e, Tag.KEY_PASSWORD) for e in contradicted):
+        reason = ("los sensores que vieron el cuerpo de esa peticion no la encontraron, ni en "
+                  "claro ni codificada")
+    else:
+        reason = ("antes de esa peticion solo se habia leido un campo que no es el de la "
+                  "e.firma")
     return (f"\n\nOtro campo de contrasena se envio a {_destinations(contradicted, context)} "
             "(por ejemplo, el inicio de sesion en el portal). No es la contrasena de la "
-            "e.firma: los sensores que vieron el cuerpo de esa peticion no la encontraron, ni en "
-            "claro ni codificada. La instrumentacion marca cualquier campo de tipo contrasena; "
+            f"e.firma: {reason}. La instrumentacion marca cualquier campo de tipo contrasena; "
             "para no mezclar la cuenta con la firma, inicie sesion aparte "
             "(`firmascope login`, o el boton de la interfaz).")
 
@@ -288,7 +293,7 @@ def password_transmitted(context: AuditContext, meta) -> RuleResult:
     # sesion en el portal se reporto como "la contrasena salio": el error que
     # mas importa evitar.
     contradicted = [e for e in context.any_egress(Tag.KEY_PASSWORD)
-                    if context.contradicted(e, Tag.KEY_PASSWORD)]
+                    if context.not_key_password_egress(e)]
     hits = [e for e in context.any_egress(Tag.KEY_PASSWORD) if e not in contradicted]
     if hits:
         direct = [e for e in context.direct_egress(Tag.KEY_PASSWORD) if e not in contradicted]
@@ -420,6 +425,17 @@ def extractable_private_key(context: AuditContext, meta) -> RuleResult:
 def local_signature(context: AuditContext, meta) -> RuleResult:
     signatures = context.events_of(EventType.CRYPTO_SIGN)
     offline = context.events_while_offline(signatures)
+    policy = context.config.isolation
+    if offline and not policy.is_total():
+        # Con "solo terceros" el servidor del portal seguia alcanzable: firmar
+        # ahi no demuestra nada sobre donde se firma. El piloto del portal real
+        # hablo con su servidor (getContractsChain, getKey) en plena ventana.
+        return RuleResult.inconclusive(
+            "Hubo firmas durante el aislamiento, pero el aislamiento era parcial.",
+            (f"Modo de aislamiento: {policy.mode.value}. Durante la ventana el servidor del "
+             "sitio seguia alcanzable, de modo que la firma pudo apoyarse en el. Para "
+             "demostrar firma local, repita la prueba con aislamiento total."),
+        )
     if offline:
         windows = context.offline_windows()
         return RuleResult(

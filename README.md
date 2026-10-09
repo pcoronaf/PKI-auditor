@@ -457,7 +457,16 @@ los cuatro están cubiertos por pruebas de regresión:
   scripts FS-CODE-001 queda `INCONCLUSIVE`, no `NOT_OBSERVED`.
 - Una firma que necesita al servidor (por ejemplo, para pedir el documento en
   el momento de firmar) se queda esperando con el aislamiento total. Use
-  «Solo terceros»: el portal sigue alcanzable y los demás dominios no.
+  «Solo terceros»: el portal sigue alcanzable y los demás dominios no. Esa
+  ventana **no es sin red**: el reporte la llama `SIN TERCEROS` en la tabla de
+  localidad, el manifiesto `PARTIAL-ISOLATION-TESTED`, y FS-LOCAL-001 no
+  confirma firma local, porque la firma pudo apoyarse en el servidor.
+- Si en la página se elige un `.key` distinto del de la sesión (por ejemplo,
+  la e.firma real con la sesión en modo sintético), FirmaScope lo advierte en
+  el momento y en el reporte. Los canarios son de la credencial registrada y
+  no dicen nada de la otra; su contraseña no está protegida en el vault, y su
+  longitud deja de servir para distinguirla de la de la cuenta del portal.
+  Para la e.firma real, use el modo `real`.
 
 ---
 

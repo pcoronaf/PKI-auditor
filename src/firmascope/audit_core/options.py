@@ -246,7 +246,9 @@ AUDIT_OPTIONS: tuple[Option, ...] = (
             Choice("full", "Total",
                    "Se bloquea toda salida. Es la prueba mas concluyente."),
             Choice("third-party", "Solo terceros",
-                   "El portal sigue alcanzable; se bloquean los demas dominios."),
+                   "El portal sigue alcanzable; se bloquean los demas dominios. "
+                   "Muestra que intenta salir hacia terceros, pero no demuestra "
+                   "firma local."),
             Choice("allowlist", "Lista de permitidos",
                    "Se bloquea todo salvo los hosts que indique."),
             Choice("none", "Sin aislamiento",

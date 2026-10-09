@@ -121,6 +121,26 @@ class IsolationPolicy:
     #: Un intento de exfiltracion bloqueado es evidencia de primer orden.
     inspect_blocked_bodies: bool = True
 
+    def is_total(self) -> bool:
+        """``True`` si durante el aislamiento no queda ningun destino alcanzable.
+
+        Solo entonces una firma completada sin red demuestra que la operacion es
+        local. Con "solo terceros" el servidor del portal sigue respondiendo: en
+        el piloto del portal real, ``getContractsChain`` y ``getKey`` salieron y
+        volvieron en plena ventana "sin red", y el reporte la llamaba OFFLINE.
+        """
+        if self.mode is IsolationMode.FULL:
+            return True
+        return self.mode is IsolationMode.ALLOWLIST and not self.allow_hosts
+
+    def window_label(self) -> str:
+        """Como se nombra en el reporte lo ocurrido dentro de una ventana."""
+        if self.is_total():
+            return "OFFLINE"
+        if self.mode is IsolationMode.THIRD_PARTY:
+            return "SIN TERCEROS"
+        return "SOLO HOSTS PERMITIDOS"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode.value,
