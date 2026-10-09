@@ -259,17 +259,11 @@ def _scannable(body: bytes) -> bytes:
     return body[:half] + body[-half:]
 
 
-def _clip_headers(headers: dict[str, str], limit: int = 512) -> dict[str, str]:
-    """Cabeceras recortadas y sin credenciales de sesion."""
-    sensitive = {"authorization", "cookie", "proxy-authorization", "set-cookie"}
-    out: dict[str, str] = {}
-    for name, value in list(headers.items())[:40]:
-        lowered = name.lower()
-        if lowered in sensitive:
-            out[name] = f"<{len(value)} bytes omitidos>"
-            continue
-        out[name] = value[:limit]
-    return out
+def _clip_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Ver :func:`firmascope.network_analyzer.headers.clip_headers`."""
+    from ..network_analyzer.headers import clip_headers
+
+    return clip_headers(headers)
 
 
 #: mitmproxy busca una lista llamada ``addons`` al cargar un script. Permite

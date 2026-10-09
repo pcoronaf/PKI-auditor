@@ -220,3 +220,31 @@ def test_la_marca_del_worker_no_llega_al_servidor():
 
     assert strip_worker_mark("https://s.mx/w.js?__fs_worker=1") == "https://s.mx/w.js"
     assert strip_worker_mark("https://s.mx/w.js?v=3&__fs_worker=1") == "https://s.mx/w.js?v=3"
+
+
+# ----------------------------------------------------------------------
+# 8. Credenciales de sesion en las cabeceras
+# ----------------------------------------------------------------------
+
+def test_cdp_no_guarda_las_credenciales_de_sesion():
+    """CDP guardaba Authorization y Cookie tal cual; el proxy si las omitia.
+
+    En un portal real son las del operador: con ellas se le puede suplantar.
+    """
+    from firmascope.network_analyzer.cdp_observer import _clip_headers
+
+    limpias = _clip_headers({"Authorization": "Bearer eyJhbGciOi.SECRETO",
+                             "Cookie": "sesion=abc123", "Accept": "*/*"})
+    assert "SECRETO" not in json.dumps(limpias)
+    assert "abc123" not in json.dumps(limpias)
+    assert limpias["Accept"] == "*/*"
+
+
+def test_cdp_y_el_proxy_recortan_igual():
+    """Dos recortes distintos fue lo que permitio el fallo."""
+    from firmascope.network_analyzer.cdp_observer import _clip_headers as cdp
+    from firmascope.proxy_addon.addon import _clip_headers as proxy
+
+    cabeceras = {"Authorization": "x" * 40, "Set-Cookie": "a=b", "X-Api-Key": "k",
+                 "Content-Type": "application/json"}
+    assert cdp(cabeceras) == proxy(cabeceras)

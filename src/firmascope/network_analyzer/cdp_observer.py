@@ -288,11 +288,10 @@ def _decode_frame(payload: str, response: dict[str, Any]) -> bytes:
 
 
 def _clip_headers(headers: dict[str, Any]) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for key, value in list(headers.items())[:40]:
-        text = str(value)
-        out[str(key)[:64]] = text[:256]
-    return out
+    """Ver :func:`firmascope.network_analyzer.headers.clip_headers`."""
+    from .headers import clip_headers
+
+    return clip_headers(headers)
 
 
 def _safe_name(url: str) -> str:
