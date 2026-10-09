@@ -2,6 +2,7 @@
 
     firmascope audit [URL]        auditar un sitio (la URL puede darse despues)
     firmascope audit URL --auto   auditar sin operador (credencial sintetica)
+    firmascope login URL          iniciar sesion en el portal y guardarla para auditar
     firmascope options            listar las opciones configurables
     firmascope credentials new    generar una credencial sintetica de laboratorio
     firmascope rules              listar el catalogo de reglas
@@ -236,7 +237,7 @@ def _seed_from_args(args: argparse.Namespace) -> dict[str, Any]:
     direct = {
         "url": "target", "level": "level", "credentials": "credentials",
         "key": "key_path", "cert": "cert_path", "isolation": "isolation",
-        "output": "output_dir", "note": "note",
+        "output": "output_dir", "note": "note", "session": "session_file",
     }
     for flag, option_id in direct.items():
         value = getattr(args, flag, None)
@@ -390,6 +391,44 @@ def cmd_audit(args: argparse.Namespace) -> int:
     print(f"Expediente: {package}")
     print(f"Reporte:    {package / 'report.html'}")
     return 1 if aborted else 0
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    """Inicio de sesion a mano, fuera de la auditoria."""
+    from ..audit_core.config import QUIET_BROWSER_ARGS, default_chromium_path, normalize_url
+    from ..browser_controller.session import capture_session, default_session_path
+
+    url = normalize_url(args.url)
+    target = Path(args.save).expanduser() if args.save else default_session_path(url)
+    print("Se abrira un navegador sin instrumentar. Inicie sesion en el portal como")
+    print("siempre. FirmaScope no ve su contrasena: solo guarda las cookies y el")
+    print("almacenamiento local de la sesion resultante.")
+
+    def wait_for_enter(_page) -> None:
+        input("\nCuando haya iniciado sesion, pulse Enter aqui... ")
+
+    try:
+        summary = capture_session(
+            url, target, wait_for_enter, browser_path=default_chromium_path(),
+            browser_args=list(QUIET_BROWSER_ARGS),
+            sandbox=False if args.no_sandbox else None)
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelado: no se guardo nada.")
+        return 130
+    except Exception as exc:
+        print(f"error: no se pudo guardar la sesion: {exc}", file=sys.stderr)
+        return 1
+
+    domains = ", ".join(summary["cookie_domains"]) or "ningun dominio"
+    print(f"\nSesion guardada en {target} (permisos 0600): "
+          f"{summary['cookies']} cookies de {domains}.")
+    if not summary["cookies"]:
+        print("aviso: no se guardo ninguna cookie; compruebe que el inicio de sesion termino.")
+    print("Este fichero permite entrar en su cuenta mientras la sesion siga activa.")
+    print("No lo copie a ningun repositorio; al terminar, cierre la sesion en el portal")
+    print("y borre el fichero.")
+    print(f"\nPara auditar con ella:  firmascope audit {url} --session {target}")
+    return 0
 
 
 def cmd_credentials_new(args: argparse.Namespace) -> int:
@@ -566,6 +605,8 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--output", default=None, help="directorio de expedientes")
     audit.add_argument("--note", default=None,
                        help="etiqueta libre para identificar la prueba")
+    audit.add_argument("--session", default=None,
+                       help="sesion del portal guardada con 'firmascope login'")
     audit.add_argument("--no-sandbox", action="store_true",
                        help="desactivar el sandbox de Chromium. Solo si el sistema no lo "
                             "admite: el sitio auditado queda menos aislado del equipo.")
@@ -581,6 +622,18 @@ def build_parser() -> argparse.ArgumentParser:
                        help="no preguntar nada: usar los argumentos y los valores por "
                             "defecto del esquema. Para guiones y canalizaciones.")
     audit.set_defaults(func=cmd_audit)
+
+    login = sub.add_parser(
+        "login", help="iniciar sesion en el portal a mano y guardar la sesion",
+        epilog="El fichero guardado permite entrar en la cuenta mientras la sesion siga "
+               "activa: guardelo fuera de cualquier repositorio y borrelo al terminar.")
+    login.add_argument("url", help="URL de inicio de sesion del portal")
+    login.add_argument("--save", default=None, metavar="FICHERO",
+                       help="donde guardar la sesion (por defecto, "
+                            "~/.firmascope/sesiones/<host>.json)")
+    login.add_argument("--no-sandbox", action="store_true",
+                       help="desactivar el sandbox de Chromium (ver 'audit --help')")
+    login.set_defaults(func=cmd_login)
 
     creds = sub.add_parser("credentials", help="credenciales sinteticas de laboratorio")
     creds_sub = creds.add_subparsers(dest="action", required=True)

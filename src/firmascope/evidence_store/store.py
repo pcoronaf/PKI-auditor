@@ -301,6 +301,11 @@ class EvidenceStore:
 
     # -- scripts --------------------------------------------------------
     def add_script(self, record: ScriptRecord, body: bytes | None = None) -> ScriptRecord:
+        if body is not None and self.vault is not None:
+            # ``record.sha256`` sigue identificando el script tal como lo sirvio
+            # el sitio; el fichero puede diferir si llevaba la sesion del
+            # operador incrustada, que no debe llegar a disco.
+            body = self.vault.mask_protected(body)
         if body is not None:
             name = f"{record.sha256[:16]}.js"
             path = self.root / "scripts" / name
@@ -354,6 +359,8 @@ class EvidenceStore:
 
     # -- artefactos -----------------------------------------------------
     def add_evidence(self, kind: str, name: str, payload: bytes, subdir: str = "evidence") -> dict[str, Any]:
+        if self.vault is not None:
+            payload = self.vault.mask_protected(payload)
         digest = hashlib.sha256(payload).hexdigest()
         safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in name)[:80]
         rel = f"{subdir}/{digest[:12]}-{safe}"

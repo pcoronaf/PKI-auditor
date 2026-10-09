@@ -146,6 +146,17 @@ AUDIT_OPTIONS: tuple[Option, ...] = (
         placeholder="portal.ejemplo.mx",
     ),
     Option(
+        id="session_file",
+        label="Sesion iniciada en el portal",
+        kind=OptionKind.PATH,
+        default="",
+        help="Si el portal pide iniciar sesion antes de firmar, iniciela aparte "
+             "(`firmascope login`, o el boton de la interfaz) y elija aqui el "
+             "fichero guardado. Asi la contrasena de su cuenta no pasa por el "
+             "navegador auditado, y sus cookies no llegan al expediente.",
+        placeholder="~/.firmascope/sesiones/portal.ejemplo.mx.json",
+    ),
+    Option(
         id="level",
         label="Nivel de auditoria",
         kind=OptionKind.CHOICE,
@@ -376,6 +387,15 @@ def validate(answers: dict[str, Any]) -> list[str]:
         if option.kind is OptionKind.PATH and value and option.id in ("key_path", "cert_path"):
             if not Path(str(value)).expanduser().is_file():
                 problems.append(f"{option.label}: no existe el archivo {value}.")
+        if option.id == "session_file" and value and str(value).strip():
+            # Se valida al configurar, no al arrancar: descubrirlo con el
+            # navegador abierto y la credencial cargada es tarde.
+            from ..browser_controller.session import SessionStateError, load_session_state
+
+            try:
+                load_session_state(str(value).strip())
+            except SessionStateError as exc:
+                problems.append(f"{option.label}: {exc}.")
         if option.kind is OptionKind.CHOICE and value is not None:
             allowed = {c.value for c in option.choices}
             if str(value) not in allowed:
@@ -458,6 +478,8 @@ def build_config(answers: dict[str, Any]) -> AuditConfig:
         and _is_synthetic_credential(answers),
         first_party_domains=_as_list(answers.get("first_party")),
         note=str(answers.get("note") or ""),
+        session_state=Path(str(answers["session_file"]).strip()).expanduser()
+        if str(answers.get("session_file") or "").strip() else None,
     )
 
 

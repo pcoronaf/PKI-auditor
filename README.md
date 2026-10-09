@@ -16,7 +16,7 @@ Y distingue rigurosamente entre **“no observé transmisión de la clave”** y
 reproducibles y basados en evidencia.
 
 > **Estado: completo y verificado contra el laboratorio.** Las pruebas
-> TC-001..TC-010 se ejecutan con un Chromium real y comparan cada hallazgo con
+> TC-001..TC-011 se ejecutan con un Chromium real y comparan cada hallazgo con
 > la verdad conocida del laboratorio; la interfaz gráfica se prueba contra el
 > núcleo de verdad. Ver
 > [Estado de implementación](#estado-de-implementación).
@@ -42,6 +42,7 @@ navegador.
 ```text
 firmascope audit [URL]        auditar un sitio
 firmascope audit URL --auto   auditar sin operador (sólo credencial sintética)
+firmascope login URL          iniciar sesión en el portal y guardarla (--session)
 firmascope options            listar las opciones configurables (--json para una GUI)
 firmascope credentials new    generar una credencial sintética de laboratorio
 firmascope rules [--json]     listar el catálogo (--rules DIR añade paquetes propios)
@@ -72,6 +73,37 @@ respuestas del asistente en lugar de ser la única vía; `--no-interactive` no
 pregunta nada, para guiones. El esquema de opciones vive en un solo sitio
 (`firmascope.audit_core.options`) y lo renderizan tanto la CLI como, en su
 momento, la interfaz gráfica: añadir una opción no obliga a tocar cada interfaz.
+
+### Portales con inicio de sesión
+
+Si el portal pide iniciar sesión antes de llegar al formulario de firma, la
+sesión se inicia **aparte**, en un navegador sin instrumentar:
+
+```bash
+firmascope login https://portal.ejemplo.mx/login      # inicie sesión a mano, pulse Enter
+firmascope audit https://portal.ejemplo.mx/firma --session ~/.firmascope/sesiones/portal.ejemplo.mx.json
+```
+
+En la interfaz gráfica es el botón «Iniciar sesión en el portal…» junto al
+campo «Sesión iniciada en el portal».
+
+Hacerlo dentro de la auditoría tendría dos problemas: la contraseña de la
+cuenta pasaría por la instrumentación, y las cookies resultantes —que dan acceso
+a la cuenta— podrían acabar en el expediente. Con `--session`:
+
+- FirmaScope nunca ve la contraseña de la cuenta: sólo guarda cookies y
+  almacenamiento local, en un fichero con permisos `0600`, por defecto en
+  `~/.firmascope/sesiones/` y no en el directorio de trabajo.
+- Antes de arrancar el navegador, cada valor de la sesión se registra en el
+  vault como **protegido**: se redacta en URLs, cabeceras, eventos, código de
+  scripts y cuerpos capturados, y la barrera final impide escribirlo. No es un
+  canario: viaja en cada petición legítima, y tratarlo como fuga acusaría al
+  portal de lo que es su funcionamiento normal.
+- El manifiesto sólo registra que la sesión estaba autenticada, nunca la ruta
+  ni el contenido del fichero.
+
+El fichero permite entrar en la cuenta mientras la sesión siga activa: al
+terminar, cierre la sesión en el portal y bórrelo.
 
 ### Control durante la auditoría
 
@@ -214,7 +246,8 @@ sobre el contenido.
 
 ## Protección de secretos
 
-- Los secretos observados **no se escriben a disco**.
+- Los secretos observados **no se escriben a disco**, tampoco las cookies y
+  tokens de la sesión del operador en el portal (`--session`).
 - La correlación usa `HMAC(clave-de-sesión aleatoria, secreto)`; la clave vive
   sólo en memoria y se destruye al terminar la sesión.
 - La captura completa de cuerpos HTTP está **deshabilitada por defecto**.
@@ -294,9 +327,10 @@ Otras desviaciones deliberadas respecto de la especificación:
 | Motor de reportes (HTML + JSON) | implementado |
 | CLI con asistente interactivo y piloto automático | implementado |
 | Addon de mitmproxy (interceptación TLS, nivel 4) | implementado |
-| Aplicaciones de laboratorio (8) | implementado |
+| Aplicaciones de laboratorio (9) | implementado |
+| Auditoría dentro de una sesión iniciada (`login`, `--session`) | implementado |
 | Interfaz gráfica (Tauri) | implementado |
-| Pruebas TC-001..TC-010, GUI y unitarias, con CI | implementado |
+| Pruebas TC-001..TC-011, GUI y unitarias, con CI | implementado |
 
 ```bash
 pip install -e ".[proxy,dev]"
@@ -388,8 +422,10 @@ Aplicaciones que reproducen las arquitecturas que importan:
 | `demo-side-channels` | la clave en la URL de un píxel, la contraseña en un beacon |
 | `demo-worker` | la clave cruza a un Web Worker y sale desde dentro |
 | `demo-minified` | `demo-key-exfiltration` minificado: sin nombres de variable |
+| `demo-login` | firma correcta tras iniciar sesión; el token viaja en cookie, cabecera y URL |
 
-Las tres últimas llegaron con el PR #2. Cada una encontró al menos un fallo.
+Las cuatro últimas llegaron con el PR #2. Cada una encontró al menos un fallo.
+La cuenta de `demo-login` es `operador` / `laboratorio-firmascope`.
 
 ```bash
 PYTHONPATH=src python3 -m firmascope.labs.server    # portal 8765, recolector 8766

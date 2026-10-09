@@ -187,6 +187,9 @@ class SecretVault:
         self._session_key: bytes | None = os.urandom(32)
         self._reps: list[Representation] = []
         self._labels: set[str] = set()
+        #: Valores que solo se redactan, como la cookie de la sesion del
+        #: operador en el portal. No son canarios: no clasifican el trafico.
+        self._protected: list[Representation] = []
 
     # -- ciclo de vida --------------------------------------------------
     @property
@@ -200,6 +203,7 @@ class SecretVault:
             del rep  # libera la referencia local; el GC hace el resto
         self._reps = []
         self._labels = set()
+        self._protected = []
 
     def __enter__(self) -> "SecretVault":
         return self
@@ -223,6 +227,39 @@ class SecretVault:
         self._reps.extend(representations(label, raw, is_text=is_text, include_markers=include_markers))
         self._labels.add(label)
         return self.fingerprint(raw)
+
+    #: Longitud minima de un valor protegido. Una cookie ``lang=es`` aparece
+    #: en cualquier parte y no es una credencial; redactarla destrozaria el
+    #: expediente sin proteger nada.
+    MIN_PROTECTED = 12
+
+    def protect(self, value: str, label: str = "SESSION") -> bool:
+        """Registra un valor que nunca debe llegar a disco, sin hacerlo canario.
+
+        Una cookie de sesion viaja legitimamente en cada peticion autenticada.
+        Como canario, cada una de esas peticiones pareceria una fuga; por eso
+        solo participa en la redaccion (:meth:`labels_in`) y en la barrera
+        final (:func:`assert_no_secrets`), nunca en :meth:`scan`, que es lo que
+        consultan los sensores para clasificar el trafico. Portado del PR #2.
+        Devuelve si se registro.
+        """
+        if not self.alive:
+            raise RuntimeError("SecretVault destruido")
+        if not value or len(value) < self.MIN_PROTECTED:
+            return False
+        raw = value.encode("utf-8")
+        if any(rep.needle == raw for rep in self._protected):
+            return True
+        for encoding, needle in (("utf8", raw),
+                                 ("url", urllib.parse.quote(value, safe="").encode()),
+                                 ("base64", _b64(raw))):
+            self._protected.append(Representation(label, encoding, needle))
+        return True
+
+    @property
+    def protected_count(self) -> int:
+        """Cuantos valores distintos se protegen (cada uno en tres formas)."""
+        return len(self._protected) // 3
 
     @property
     def labels(self) -> set[str]:
@@ -269,7 +306,33 @@ class SecretVault:
         labels: set[str] = set()
         for variant in decoded_variants(blob):
             labels |= {m.label for m in self.scan(variant)}
+            labels |= {m.label for m in self.scan_protected(variant)}
         return labels
+
+    def mask_protected(self, blob: bytes) -> bytes:
+        """``blob`` con cada valor protegido sustituido por un marcador.
+
+        Para lo que se guarda tal cual (codigo de scripts, cuerpos capturados):
+        un ``window.TOKEN = "..."`` en un script en linea llevaria la sesion
+        del operador al expediente. Los canarios no se tocan: un cuerpo
+        capturado con la clave sintetica dentro es la prueba de la fuga.
+        """
+        if not self.alive or not self._protected or not blob:
+            return blob
+        for rep in self._protected:
+            if rep.needle in blob:
+                blob = blob.replace(rep.needle, f"<protegido:{rep.label}>".encode())
+        return blob
+
+    def scan_protected(self, blob: bytes | str) -> list[CanaryMatch]:
+        """Valores protegidos presentes en ``blob``. Solo para redactar."""
+        if not self.alive or not self._protected:
+            return []
+        if isinstance(blob, str):
+            blob = blob.encode("utf-8", "replace")
+        return [CanaryMatch(rep.label, rep.encoding, idx, len(rep.needle))
+                for rep in self._protected
+                for idx in [blob.find(rep.needle)] if idx >= 0]
 
 
 def decoded_variants(blob: bytes | str) -> list[bytes | str]:
@@ -379,7 +442,8 @@ def assert_no_secrets(payload: str, vault: SecretVault | None) -> None:
     """Invariante de seguridad usada en pruebas y en el exportador."""
     if vault is None or not vault.alive:
         return
-    hits = [hit for variant in decoded_variants(payload) for hit in vault.scan(variant)]
+    hits = [hit for variant in decoded_variants(payload)
+            for hit in vault.scan(variant) + vault.scan_protected(variant)]
     if hits:
         raise AssertionError(
             "material sensible a punto de escribirse a disco: "

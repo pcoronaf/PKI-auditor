@@ -159,7 +159,7 @@ def _ask_path(option: Option, current: Any) -> str:
                 continue
             return ""
         resolved = Path(value).expanduser()
-        if option.id in ("key_path", "cert_path") and not resolved.is_file():
+        if option.id in ("key_path", "cert_path", "session_file") and not resolved.is_file():
             print(f"  No existe el archivo: {resolved}")
             continue
         return str(resolved)

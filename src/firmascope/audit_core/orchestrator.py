@@ -128,8 +128,10 @@ class AuditSession:
     def start_browser(self) -> Any:
         from ..browser_controller.controller import BrowserController
 
+        session_state = self._load_session_state()
         self.controller = BrowserController(
-            self.config, self.session_id, self.store, self.emit, self.vault).start()
+            self.config, self.session_id, self.store, self.emit, self.vault,
+            session_state=session_state).start()
         self.store.open_session(
             target=self.config.target or "(sin objetivo: lo proporciona el operador)",
             config=self.config.to_dict(),
@@ -142,6 +144,29 @@ class AuditSession:
                               "level": int(self.config.level),
                               "credential_mode": self.config.credential_mode.value}))
         return self.controller
+
+    def _load_session_state(self) -> dict[str, Any] | None:
+        """Lee la sesion autenticada y protege sus valores antes del navegador.
+
+        Desde la primera peticion, la redaccion y la barrera final impiden que
+        las cookies y tokens de la cuenta del operador lleguen al expediente.
+        """
+        if self.config.session_state is None:
+            return None
+        from ..browser_controller.session import (
+            describe_session,
+            load_session_state,
+            session_secrets,
+        )
+
+        state = load_session_state(self.config.session_state)
+        for value in session_secrets(state):
+            self.vault.protect(value)
+        self.emit(Event(EventType.CHECKPOINT, self.session_id, sensor="orchestrator",
+                        data={"name": "authenticated-session",
+                              "protected_values": self.vault.protected_count,
+                              **describe_session(state)}))
+        return state
 
     def navigate(self, url: str) -> str:
         """Abre una URL, fijando el objetivo si aun no habia ninguno."""

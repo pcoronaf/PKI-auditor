@@ -63,7 +63,8 @@ const state = {
   stages: [],
   credential: null,
   pollTimer: null,
-  busy: false
+  busy: false,
+  login: null
 };
 
 const $ = (id) => document.getElementById(id);
@@ -262,12 +263,62 @@ function pathControl(opt, value) {
     });
     row.appendChild(pick);
   }
+  if (opt.id === 'session_file') { row.appendChild(loginControl(input)); }
   return row;
+}
+
+/*
+ * Inicio de sesion en el portal, fuera de la auditoria. El nucleo abre un
+ * navegador sin instrumentar; la persona inicia sesion alli -- su contrasena
+ * no pasa por esta interfaz ni por el puente -- y avisa con "Guardar sesion".
+ * El estado vive en `state.login` porque el formulario se vuelve a pintar con
+ * cada respuesta, y el boton debe seguir diciendo en que paso esta.
+ */
+function loginControl(input) {
+  const box = document.createElement('span');
+  box.className = 'row';
+  const button = (text, handler) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = text;
+    b.addEventListener('click', (ev) => { ev.preventDefault(); handler(); });
+    box.appendChild(b);
+    return b;
+  };
+
+  if (!state.login) {
+    button('Iniciar sesion en el portal…', () => withBusy(async () => {
+      // La direccion la saca el nucleo de las respuestas: la interfaz no
+      // lee campos por su nombre.
+      state.login = await call('login_start', { answers: state.answers });
+      toast('Inicie sesion en la ventana que se abrio y pulse "Guardar sesion".');
+      renderSetup();
+    }));
+    return box;
+  }
+
+  button('Guardar sesion', () => withBusy(async () => {
+    const saved = await call('login_save');
+    state.login = null;
+    input.value = saved.path;
+    await setAnswer('session_file', saved.path);
+    toast(`Sesion guardada: ${saved.cookies} cookies de `
+          + (saved.cookie_domains.join(', ') || 'ningun dominio'),
+          saved.cookies === 0);
+    renderSetup();
+  }));
+  button('Cancelar', () => withBusy(async () => {
+    await call('login_cancel');
+    state.login = null;
+    renderSetup();
+  }));
+  return box;
 }
 
 function extensionsFor(id) {
   if (id === 'key_path') { return ['key', 'pem']; }
   if (id === 'cert_path') { return ['cer', 'crt', 'der']; }
+  if (id === 'session_file') { return ['json']; }
   return [];
 }
 

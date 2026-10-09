@@ -30,7 +30,7 @@ def teclear(monkeypatch):
 
 
 def test_todo_por_defecto_produce_una_configuracion_valida(teclear):
-    restantes = teclear(["portal.ejemplo.mx", "", "", "", "", ""])
+    restantes = teclear(["portal.ejemplo.mx", "", "", "", "", "", ""])
     setup = wizard.run_setup()
     assert setup is not None
     assert setup.config.target == "https://portal.ejemplo.mx"
@@ -41,20 +41,20 @@ def test_todo_por_defecto_produce_una_configuracion_valida(teclear):
 
 def test_el_numero_tecleado_es_el_nivel_y_no_la_posicion(teclear):
     """Teclear "2" debe elegir el nivel 2, no la segunda alternativa listada."""
-    teclear(["sitio.mx", "2", "", "", "", ""])
+    teclear(["sitio.mx", "", "2", "", "", "", ""])
     setup = wizard.run_setup()
     assert int(setup.config.level) == 2
 
 
 def test_se_puede_cancelar_en_la_revision(teclear):
-    teclear(["sitio.mx", "", "", "", "", "c"])
+    teclear(["sitio.mx", "", "", "", "", "", "c"])
     assert wizard.run_setup() is None
 
 
 def test_se_puede_corregir_desde_la_revision(teclear):
     """[numero] edita ese campo y vuelve al resumen."""
     teclear([
-        "primero.mx", "", "", "", "",   # basicas + avanzadas (no)
+        "primero.mx", "", "", "", "", "",  # basicas + avanzadas (no)
         "1", "segundo.mx",              # editar el campo 1
         "",                             # iniciar
     ])
@@ -72,7 +72,7 @@ def test_la_credencial_propia_pide_los_archivos_y_la_contrasena(
     """
     monkeypatch.setattr(wizard.getpass, "getpass", lambda prompt="": "secreto")
     restantes = teclear([
-        "sitio.mx", "", "2",             # sitio, nivel por defecto, own-test
+        "sitio.mx", "", "", "2",         # sitio, sin sesion, nivel, own-test
         str(credential.key_path),
         str(credential.cert_path),
         "", "",                          # aislamiento, avanzadas (no)
@@ -91,7 +91,7 @@ def test_no_arranca_con_un_archivo_que_no_existe(teclear, credential, tmp_path):
     """El campo se vuelve a pedir en lugar de arrancar con una ruta invalida."""
     inexistente = tmp_path / "no-esta.key"
     restantes = teclear([
-        "sitio.mx", "", "2",
+        "sitio.mx", "", "", "2",
         str(inexistente),                # rechazado: no existe
         str(credential.key_path),        # segundo intento, valido
         str(credential.cert_path),
@@ -112,13 +112,13 @@ def test_no_arranca_con_un_archivo_que_no_existe(teclear, credential, tmp_path):
 
 def test_la_credencial_real_exige_escribir_acepto(teclear):
     """Un "si" no basta: hay que escribir la palabra."""
-    teclear(["sitio.mx", "", "3", "si"])
+    teclear(["sitio.mx", "", "", "3", "si"])
     assert wizard.run_setup() is None, "se acepto el modo real sin la confirmacion"
 
 
 def test_la_semilla_no_se_vuelve_a_preguntar_como_si_no_se_hubiera_dicho(teclear):
     """Lo indicado por argumento aparece como valor por defecto."""
-    teclear(["", "", "", "", "", ""])
+    teclear(["", "", "", "", "", "", ""])
     setup = wizard.run_setup(seed={"target": "sembrado.mx", "level": "3"})
     assert setup.config.target == "https://sembrado.mx"
     assert int(setup.config.level) == 3

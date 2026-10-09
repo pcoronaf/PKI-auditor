@@ -2,7 +2,7 @@
 
 Levanta dos servidores en el mismo proceso:
 
-* el *portal* (puerto 8765), que sirve las cinco aplicaciones;
+* el *portal* (puerto 8765), que sirve las aplicaciones;
 * el *recolector* (puerto 8766), un tercero distinto que recibe lo que las
   aplicaciones maliciosas exfiltran.
 
@@ -32,6 +32,22 @@ COLLECTOR_PORT = 8766
 #: se comprueba que el nivel 1 y el nivel 2 coinciden cuando deben.
 FLAGS: dict[str, Any] = {"collectKeyMaterial": False}
 
+#: Cuenta de demo-login. Da acceso a la plataforma simulada, no a ninguna
+#: e.firma: es el equivalente a la cuenta del operador en el portal.
+LAB_LOGIN_USER = "operador"
+LAB_LOGIN_PASSWORD = "laboratorio-firmascope"
+LAB_SESSION_COOKIE = "fs_lab_session"
+
+#: Rutas de demo-login que exigen sesion. La pagina de acceso no.
+PROTECTED_PATHS = ("/demo-login/", "/demo-login/index.html", "/demo-login/app.js")
+
+#: Sesiones validas: cookie -> token de acceso. Solo en memoria.
+LAB_SESSIONS: dict[str, str] = {}
+
+#: Pings autenticados que recibio demo-login. Es la verdad conocida de que la
+#: auditoria corrio de verdad dentro de la sesion, y no ante la pagina de acceso.
+LOGIN_PINGS: list[str] = []
+
 
 class PortalHandler(SimpleHTTPRequestHandler):
     """Sirve las aplicaciones y responde a sus endpoints."""
@@ -47,7 +63,48 @@ class PortalHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _session(self) -> str | None:
+        """Cookie de sesion valida de demo-login, o ``None``."""
+        from http.cookies import CookieError, SimpleCookie
+
+        jar = SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie", ""))
+        except CookieError:
+            return None
+        morsel = jar.get(LAB_SESSION_COOKIE)
+        return morsel.value if morsel is not None and morsel.value in LAB_SESSIONS else None
+
+    def _redirect(self, location: str, status: int = 302, cookie: str = "") -> None:
+        self.send_response(status)
+        self.send_header("Location", location)
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self) -> None:  # noqa: N802
+        path = self.path.split("?")[0]
+        if path in PROTECTED_PATHS and self._session() is None:
+            self._redirect("/demo-login/login.html")
+            return
+        if path == "/api/me":
+            session = self._session()
+            if session is None:
+                self._json(401, {"error": "sin sesion"})
+            else:
+                self._json(200, {"user": LAB_LOGIN_USER, "access_token": LAB_SESSIONS[session]})
+            return
+        if path == "/api/ping":
+            from urllib.parse import parse_qs, urlsplit
+
+            token = (parse_qs(urlsplit(self.path).query).get("access_token") or [""])[0]
+            if self._session() is not None and token in LAB_SESSIONS.values():
+                LOGIN_PINGS.append(token)
+                self._json(200, {"ok": True})
+            else:
+                self._json(401, {"error": "token invalido"})
+            return
         if self.path.startswith("/api/flags"):
             self._json(200, FLAGS)
             return
@@ -73,6 +130,20 @@ class PortalHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
+        if self.path.startswith("/api/login"):
+            import secrets
+            from urllib.parse import parse_qs
+
+            form = parse_qs(body.decode("utf-8", "replace"))
+            if ((form.get("username") or [""])[0] != LAB_LOGIN_USER
+                    or (form.get("password") or [""])[0] != LAB_LOGIN_PASSWORD):
+                self._json(401, {"error": "usuario o contrasena incorrectos"})
+                return
+            session = secrets.token_urlsafe(24)
+            LAB_SESSIONS[session] = secrets.token_urlsafe(24)
+            self._redirect("/demo-login/", 303,
+                           f"{LAB_SESSION_COOKIE}={session}; HttpOnly; Path=/; SameSite=Lax")
+            return
         if self.path.startswith("/api/sign-server-side"):
             # El portal recibe la clave y la usa. Firmar de verdad es lo que
             # hace concreto el riesgo de esta arquitectura: un servidor que

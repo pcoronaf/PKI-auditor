@@ -41,8 +41,11 @@ class BrowserController:
     """Envoltura de Playwright orientada a auditoria."""
 
     def __init__(self, config: AuditConfig, session_id: str, store: EvidenceStore,
-                 emit: Callable[[Event], None], vault: SecretVault | None = None):
+                 emit: Callable[[Event], None], vault: SecretVault | None = None,
+                 session_state: dict[str, Any] | None = None):
         self.config = config
+        #: Estado autenticado, ya leido y protegido en el vault por la sesion.
+        self.session_state = session_state
         self.session_id = session_id
         self.store = store
         self.emit = emit
@@ -103,6 +106,11 @@ class BrowserController:
             # en el almacen de certificados del sistema. El contexto muere con
             # la sesion, y con el la excepcion.
             context_kwargs["ignore_https_errors"] = True
+        if self.session_state is not None:
+            # Se pasa el estado ya leido, no la ruta: asi el fichero se abre
+            # una sola vez, y lo que entra al navegador es exactamente lo que
+            # se protegio en el vault.
+            context_kwargs["storage_state"] = self.session_state
         self.context = self.browser.new_context(**context_kwargs)
         self.context.set_default_timeout(30_000)
 

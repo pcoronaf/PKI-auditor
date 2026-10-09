@@ -47,7 +47,9 @@ PYTHONPATH=src python3 -m pytest tests/ -q -m "not e2e"   # sin navegador
 
 - **Ningún secreto llega a disco.** Los canarios viven en el vault, en memoria.
   Todo lo que se escribe en el expediente pasa por `redact()` y por
-  `assert_no_secrets()`, incluidas URLs, cabeceras y peticiones.
+  `assert_no_secrets()`, incluidas URLs, cabeceras y peticiones. La sesión
+  del operador en el portal (`--session`) se protege igual, como valor
+  protegido y no como canario: viaja en cada petición legítima.
 - **El aislamiento manda.** Una petición que el aislamiento abortó no salió,
   aunque otros sensores la vieran. La correlación respeta esa autoridad.
 - **No observado no es imposible.** Ninguna regla convierte ausencia de

@@ -354,9 +354,14 @@ class AuditConfig:
     #: Segundos por etapa y en la etapa de firma, en modo piloto automatico.
     dwell: float = 3.0
     offline_dwell: float = 4.0
+    #: Sesion autenticada guardada con ``firmascope login``. Es una credencial
+    #: de la cuenta del operador: nunca se copia al expediente.
+    session_state: Path | None = None
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
+        if self.session_state is not None:
+            self.session_state = Path(self.session_state).expanduser()
         self.level = AuditLevel(self.level)
         self.rules_dirs = [Path(p) for p in self.rules_dirs]
         self.credential_mode = CredentialMode(self.credential_mode)
@@ -474,6 +479,8 @@ class AuditConfig:
             "correlation_window_ms": self.correlation_window_ms,
             "proxy": self.proxy.to_dict(),
             "note": self.note,
+            # Solo el hecho: la ruta del fichero dice donde esta la credencial.
+            "authenticated_session": self.session_state is not None,
             "capabilities": {
                 "network_observation": self.network_observation,
                 "instrumentation": self.instrumentation,
