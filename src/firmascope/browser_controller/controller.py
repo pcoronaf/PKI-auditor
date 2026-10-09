@@ -27,6 +27,7 @@ from ..evidence_store.store import EvidenceStore, ScriptRecord
 from ..instrumentation_agent.loader import DEFAULT_CHANNEL, build_init_script, record_to_event
 from ..network_analyzer import domains
 from ..network_analyzer.cdp_observer import NetworkObserver
+from .isolation import DEFAULT_STAGES, NetworkIsolation, Stage, StagedOfflineTest
 
 
 class BrowserController:
@@ -45,9 +46,10 @@ class BrowserController:
         self.context: BrowserContext | None = None
         self.page: Page | None = None
         self.observer: NetworkObserver | None = None
+        self.isolation: NetworkIsolation | None = None
+        self.proxy: Any | None = None
 
         self.browser_version = ""
-        self.offline = False
         self._frame_names: dict[Any, str] = {}
         self._frame_counter = 0
         self._worker_counter = 0
@@ -67,14 +69,18 @@ class BrowserController:
         }
         if self.config.browser_path:
             launch_kwargs["executable_path"] = self.config.browser_path
-        if self.config.proxy_enabled:
-            launch_kwargs["proxy"] = {
-                "server": f"http://{self.config.proxy.host}:{self.config.proxy.port}",
-                # Chromium omite el proxy para loopback por defecto. Sin esta
-                # directiva, un objetivo en 127.0.0.1 (el laboratorio, o un
-                # sitio en desarrollo) pasaria por delante del sensor.
-                "bypass": "<-loopback>",
-            }
+
+        # El proxy arranca antes del navegador: su puerto se elige en tiempo de
+        # ejecucion y el navegador lo necesita en la linea de comandos.
+        self._start_proxy()
+        if self.proxy is not None and self.proxy.running:
+            launch_kwargs["proxy"] = {"server": self.proxy.server}
+            # Chromium no envia el trafico de loopback al proxy salvo que se le
+            # diga: sin esto, un portal servido en 127.0.0.1 -- el laboratorio,
+            # o un entorno de preproduccion local -- quedaria sin observar y el
+            # silencio se leeria como ausencia de trafico.
+            launch_kwargs["args"] = list(launch_kwargs["args"]) + [
+                "--proxy-bypass-list=<-loopback>"]
         self.browser = self._playwright.chromium.launch(**launch_kwargs)
         self.browser_version = self.browser.version
 
@@ -83,17 +89,23 @@ class BrowserController:
             # El perfil es efimero: Playwright crea un directorio temporal por
             # contexto y lo destruye al cerrarlo.
         }
-        if self.config.proxy_enabled:
+        if self.proxy is not None and self.proxy.running:
             # La CA de auditoria solo se acepta durante la sesion; no se instala
-            # en el almacen de certificados del sistema.
+            # en el almacen de certificados del sistema. El contexto muere con
+            # la sesion, y con el la excepcion.
             context_kwargs["ignore_https_errors"] = True
         self.context = self.browser.new_context(**context_kwargs)
         self.context.set_default_timeout(30_000)
 
         self.context.expose_binding(DEFAULT_CHANNEL, self._on_agent_record)
-        self.context.add_init_script(build_init_script(self.session_id, DEFAULT_CHANNEL))
+        self.context.add_init_script(build_init_script(
+            self.session_id, DEFAULT_CHANNEL,
+            redact_names=bool(getattr(self.config.privacy, "redact_filenames", False))))
 
         self.observer = NetworkObserver(self.session_id, self.store, self.config, self.emit, self.vault)
+        self.isolation = NetworkIsolation(
+            self.context, self.config, self.emit, self.session_id,
+            vault=self.vault, store=self.store)
 
         self.context.on("page", self._on_page)
         self.context.on("serviceworker", self._on_service_worker)
@@ -105,6 +117,12 @@ class BrowserController:
     def stop(self) -> None:
         self.drain_agent()
         self.pump()
+        if self.proxy is not None:
+            # Antes de cerrar el navegador: para y destruye la CA efimera.
+            try:
+                self.proxy.stop()
+            except Exception:  # pragma: no cover - cierre best-effort
+                pass
         for closer in (self.context, self.browser):
             try:
                 if closer is not None:
@@ -135,6 +153,9 @@ class BrowserController:
         page.on("worker", self._on_worker)
         page.on("frameattached", self._on_frame_attached)
         page.on("console", self._on_console)
+        # Tambien cuenta como navegacion exitosa la que hace el operador a mano
+        # en modo headful: sin esto, aislar se negaria por falta de carga previa.
+        page.on("load", self._on_page_load)
         page.on("pageerror", lambda err: self.emit(Event(
             EventType.AGENT_ERROR, self.session_id, sensor="browser",
             data={"kind": "pageerror", "message": str(err)[:300]})))
@@ -167,6 +188,10 @@ class BrowserController:
     def _on_service_worker(self, worker) -> None:
         self.emit(Event(EventType.CONTEXT_CREATED, self.session_id, context="service-worker",
                         sensor="browser", data={"kind": "service-worker", "url": worker.url}))
+
+    def _on_page_load(self, page) -> None:
+        if self.isolation is not None:
+            self.isolation.navigation_succeeded = True
 
     def _on_console(self, message) -> None:
         if message.type in ("error", "warning"):
@@ -217,8 +242,42 @@ class BrowserController:
         return drained
 
     def pump(self) -> int:
-        """Procesa los eventos CDP pendientes."""
-        return self.observer.pump() if self.observer else 0
+        """Procesa lo pendiente de CDP y del proxy.
+
+        Ambos sensores producen en otros hilos o en callbacks, y solo este punto
+        escribe en el expediente: asi la cadena de hashes conserva un orden
+        unico y verificable.
+        """
+        drained = self.observer.pump() if self.observer else 0
+        if self.proxy is not None and self.proxy.running:
+            drained += self.proxy.pump()
+        return drained
+
+    # ------------------------------------------------------------------
+    def _start_proxy(self) -> None:
+        """Arranca el proxy de interceptacion si el nivel lo pide.
+
+        Que mitmproxy no este instalado no invalida la auditoria: se registra
+        que ese sensor falta y la sesion continua con los otros tres. Lo que no
+        se puede hacer es seguir como si estuviera, porque entonces la ausencia
+        de hallazgos de contenido no significaria nada.
+        """
+        if not self.config.proxy_enabled:
+            return
+        from ..proxy_addon.runner import ProxyRunner
+
+        runner = ProxyRunner(self.config, self.session_id, self.store,
+                             self.emit, self.vault)
+        if runner.start():
+            self.proxy = runner
+            return
+        self.emit(Event(EventType.CHECKPOINT, self.session_id, sensor="proxy",
+                        data={"name": "proxy-unavailable", "detail": runner.error,
+                              "consequence": "La sesion continua sin interceptacion "
+                                             "TLS: los cuerpos que CDP no entregue "
+                                             "(multipart, flujos) no se podran "
+                                             "examinar por contenido."}))
+        self.proxy = runner  # se conserva para que el reporte explique la ausencia
 
     def wait(self, seconds: float, poll: float = 0.2) -> None:
         """Espera procesando eventos (no bloquea la captura)."""
@@ -238,26 +297,56 @@ class BrowserController:
     # ------------------------------------------------------------------
     def goto(self, url: str, wait_until: str = "load", timeout: float = 30_000) -> None:
         assert self.page is not None
+        if self.offline:
+            # Navegar con la red aislada deja una pagina en blanco. Es la causa
+            # habitual del sintoma "no carga la pagina" al reordenar las etapas.
+            self.emit(Event(
+                EventType.AGENT_ERROR, self.session_id, sensor="controller",
+                data={"kind": "navigation-while-isolated", "url": url,
+                      "error": "se esta navegando con la red aislada; la carga fallara. "
+                               "Restablezca la red (etapa ONLINE) antes de navegar"}))
         try:
             self.page.goto(url, wait_until=wait_until, timeout=timeout)
+            if self.isolation is not None:
+                self.isolation.navigation_succeeded = True
         except Exception as exc:
             self.emit(Event(EventType.AGENT_ERROR, self.session_id, sensor="browser",
                             data={"kind": "navigation", "url": url, "error": str(exc)[:300]}))
         self.pump()
 
-    def set_offline(self, offline: bool, reason: str = "") -> None:
-        """Aisla o restablece la red sin cerrar el navegador (FR-007)."""
-        assert self.context is not None
-        self.context.set_offline(offline)
-        self.offline = offline
-        event_type = EventType.NETWORK_OFF if offline else EventType.NETWORK_ON
-        self.emit(Event(event_type, self.session_id, sensor="controller",
-                        data={"reason": reason, "mechanism": "CDP Network.emulateNetworkConditions"}))
-        self.store.add_checkpoint(
-            name="network-off" if offline else "network-on",
-            network="OFFLINE" if offline else "ONLINE",
-            detail=reason,
-        )
+    @property
+    def offline(self) -> bool:
+        """True si la red del navegador esta aislada ahora mismo."""
+        return self.isolation is not None and self.isolation.engaged
+
+    def preload(self, timeout: float | None = None) -> bool:
+        """Espera a que la red se calme, para poder aislar sin romper la pagina."""
+        if self.isolation is None:
+            return False
+        return self.isolation.preload(self.page, timeout)
+
+    def set_offline(self, offline: bool, reason: str = "") -> bool:
+        """Aisla o restablece la red sin cerrar el navegador (FR-007).
+
+        El aislamiento aborta las peticiones nuevas en lugar de apagar la pila
+        de red: la pagina ya cargada sigue operativa y cada intento de salida
+        queda registrado como evidencia. Devuelve el estado efectivo.
+        """
+        if self.isolation is None:
+            return False
+        if offline:
+            if self.config.isolation.preload_before_isolating:
+                self.isolation.preload(self.page)
+            return self.isolation.engage(reason)
+        return self.isolation.release(reason)
+
+    def staged_offline_test(self, stages: list[Stage] | None = None) -> StagedOfflineTest:
+        """Crea la prueba de firma por etapas sobre esta sesion."""
+        if self.isolation is None:
+            raise RuntimeError("el navegador no esta iniciado")
+        return StagedOfflineTest(
+            self, self.isolation, self.emit, self.session_id,
+            stages=stages or list(DEFAULT_STAGES))
 
     def checkpoint(self, name: str, detail: str = "") -> dict:
         record = self.store.add_checkpoint(
@@ -336,10 +425,21 @@ class BrowserController:
 
     # ------------------------------------------------------------------
     def versions(self) -> dict[str, str]:
-        return {
+        info = {
             "browser": self.browser_version,
             "browser_path": self.config.browser_path or "(playwright default)",
         }
+        if self.proxy is not None:
+            from ..proxy_addon.runner import version as mitm_version
+            info["mitmproxy"] = mitm_version() or "(no instalado)"
+        return info
+
+    def proxy_summary(self) -> dict[str, Any]:
+        """Estado del sensor de proxy, incluido el caso de que no exista."""
+        if self.proxy is None:
+            return {"enabled": False,
+                    "detail": "nivel inferior a 4, o proxy desactivado"}
+        return self.proxy.summary()
 
 
 def _sourcemap_url(body: str) -> str:

@@ -28,14 +28,22 @@ def agent_sha256() -> str:
 
 
 def build_init_script(session_id: str, channel: str = DEFAULT_CHANNEL,
-                      context: str | None = None, max_queue: int = 5000) -> str:
+                      context: str | None = None, max_queue: int = 5000,
+                      redact_names: bool = False) -> str:
     """Genera el script que se inyecta antes del JavaScript del sitio.
 
     El agente recibe su propia fuente en ``__FS_AGENT_SRC__`` para poder
     reinyectarse dentro de los workers que la aplicacion cree.
+
+    ``redact_names`` evita que los nombres de archivo lleguen siquiera a cruzar
+    el puente hacia Python. Con una e.firma real el nombre contiene el RFC del
+    titular, de modo que se emite solo la extension. El almacen de evidencias
+    redacta de nuevo por su cuenta: son dos barreras independientes.
     """
     source = agent_source()
     config: dict[str, Any] = {"session": session_id, "channel": channel, "maxQueue": max_queue}
+    if redact_names:
+        config["redactNames"] = True
     if context:
         config["context"] = context
     return (

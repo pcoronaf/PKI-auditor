@@ -1,23 +1,5 @@
-"""Motor de correlacion: reconstruccion de cadenas de procedencia."""
+"""Correlacion de eventos de multiples sensores y procedencia de datos."""
 
-from .engine import (
-    VERDICT_EXFILTRATION,
-    VERDICT_LEGITIMATE,
-    VERDICT_UNCLASSIFIED,
-    Chain,
-    CorrelationEngine,
-    CorrelationReport,
-    Step,
-    correlate,
-)
+from .sensors import CorrelationIndex, EgressGroup, correlate
 
-__all__ = [
-    "VERDICT_EXFILTRATION",
-    "VERDICT_LEGITIMATE",
-    "VERDICT_UNCLASSIFIED",
-    "Chain",
-    "CorrelationEngine",
-    "CorrelationReport",
-    "Step",
-    "correlate",
-]
+__all__ = ["CorrelationIndex", "EgressGroup", "correlate"]

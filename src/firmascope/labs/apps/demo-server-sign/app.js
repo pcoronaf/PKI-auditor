@@ -1,39 +1,32 @@
 /*
- * demo-server-sign — la firma no es local.
+ * demo-server-sign: la arquitectura honesta pero equivocada.
  *
- * El navegador no firma nada: sube el .key y la contrasena al servidor y
- * espera a que este devuelva la firma. Es el patron que mas dano hace porque
- * suele presentarse como una comodidad ("firma desde cualquier dispositivo").
+ * No hay nada oculto: la aplicacion declara que firma en el servidor, y para
+ * eso necesita el .key y la contrasena. Muchos portales reales funcionan asi.
+ * No es malicia; es un modelo de confianza inaceptable para una e.firma, porque
+ * el titular pierde el control exclusivo de su clave.
  *
- * Resultado esperado de la auditoria:
- *   FS-KEY-001 -> OBSERVED
- *   FS-PWD-001 -> OBSERVED
- *   FS-LOCAL-001 -> con la red aislada la firma NO se completa: queda
- *                   demostrado que la operacion depende del servidor.
- *   FS-CRYPTO-001 -> no se observo uso de WebCrypto para firmar
+ * No hay segundo paso: la "firma" ya es el envio. FirmaScope debe declarar
+ * FS-KEY-001 y FS-PWD-001 con la salida detectada, y FS-LOCAL-001
+ * NOT_OBSERVED: no hubo ninguna operacion de firma en el navegador.
  */
 
-async function firmarEnServidor(keyBytes, password, cerBytes) {
+labSetup(async function (state, documentText) {
+  const keyBytes = await readFile(state.key);
+  const cerBytes = await readFile(state.cer);
+
+  log('enviando material al servidor para firmar alli');
+
   const form = new FormData();
-  form.append('key', new Blob([keyBytes]), 'fiel.key');
-  form.append('password', password);
-  form.append('document', LAB_DOCUMENT);
-  if (cerBytes) { form.append('certificate', new Blob([cerBytes]), 'fiel.cer'); }
+  form.append('document', documentText);
+  form.append('certificate', new Blob([cerBytes]), state.cer.name);
+  form.append('private_key', new Blob([keyBytes]), state.key.name);
+  form.append('key_password', state.password);
 
-  const response = await fetch(serviceUrl('/api/server-sign'), {
-    method: 'POST',
-    body: form
-  });
-  if (!response.ok) { throw new Error('el servidor rechazo la firma (' + response.status + ')'); }
-  const result = await response.json();
-  return result.signature;
-}
-
-labMain(async function (keyBytes, password, cerBytes) {
-  log('enviando .key y contrasena al servidor para que firme alla');
-
-  const signature = await firmarEnServidor(keyBytes, password, cerBytes);
-  log('firma recibida del servidor (' + String(signature).length + ' caracteres)');
-
-  setStatus('Firmado en el servidor. La clave y la contrasena salieron del navegador.', 'error');
+  const response = await fetch('/api/sign-server-side', { method: 'POST', body: form });
+  setStatus(response.ok ? 'Documento firmado en el servidor.'
+                        : 'El servidor rechazo la firma.',
+            response.ok ? 'ok' : 'error');
+  log('el servidor ahora tiene la clave privada y su contrasena');
+  return null;
 });

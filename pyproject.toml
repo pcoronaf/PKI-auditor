@@ -32,6 +32,10 @@ dev = ["pytest>=7", "pytest-timeout>=2"]
 
 [project.scripts]
 firmascope = "firmascope.cli.main:main"
+# La interfaz grafica lanza el nucleo con `python3 -m firmascope.gui_bridge.bridge`,
+# que no depende de que el directorio de scripts este en el PATH. Este alias
+# existe para lanzarlo a mano al depurar el protocolo.
+firmascope-bridge = "firmascope.gui_bridge.bridge:main"
 
 [project.urls]
 Homepage = "https://github.com/pcoronaf/PKI-auditor"

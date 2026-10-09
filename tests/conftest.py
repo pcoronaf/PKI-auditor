@@ -1,21 +1,73 @@
-"""Utilidades compartidas por la suite.
+"""Fixturas comunes de las pruebas de FirmaScope.
 
-Las pruebas construyen sesiones sinteticas: en lugar de arrancar un navegador,
-fabrican la lista de eventos que la instrumentacion habria producido. Eso
-permite fijar el comportamiento del motor de reglas — que es donde viven las
-afirmaciones del reporte — sin depender de Chromium.
+Las pruebas unitarias no tocan la red ni el navegador. Las marcadas ``e2e``
+levantan el laboratorio y un Chromium real: son las unicas que pueden
+responder si la herramienta *funciona*, porque comparan los hallazgos con la
+verdad conocida del laboratorio (si el recolector recibio los bytes o no).
 """
 
 from __future__ import annotations
 
 import itertools
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from firmascope.audit_core.config import AuditConfig, AuditLevel
-from firmascope.audit_core.events import Event, EventType, Tag
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from firmascope.audit_core.config import AuditConfig, AuditLevel  # noqa: E402
+from firmascope.audit_core.events import Event, EventType, Tag  # noqa: E402
+
+
+@pytest.fixture(scope="session")
+def credential(tmp_path_factory):
+    """Credencial sintetica compartida: generarla cuesta un RSA de 2048."""
+    from firmascope.credentials import generate
+
+    cred = generate()
+    cred.write(tmp_path_factory.mktemp("efirma"))
+    return cred
+
+
+@pytest.fixture
+def vault():
+    from firmascope.audit_core.secrets import SecretVault
+
+    store = SecretVault()
+    yield store
+    store.destroy()
+
+
+@pytest.fixture(scope="session")
+def lab():
+    """Portal de laboratorio y recolector de terceros, en hilos de fondo."""
+    from firmascope.labs import server as lab_server
+
+    portal, collector = lab_server.serve()
+    time.sleep(0.3)
+    yield lab_server
+    portal.shutdown()
+    collector.shutdown()
+
+
+def analyze_source(source: str):
+    """Analiza un fragmento de JavaScript y devuelve el informe estatico."""
+    from firmascope.static_analyzer.analyzer import analyze_scripts
+
+    body = source.encode("utf-8")
+    scripts = [{"sha256": "probe", "url": "https://site.test/probe.js", "size": len(body)}]
+    return analyze_scripts(scripts, lambda _s: body)
+
+
+# ----------------------------------------------------------------------
+# Constructores de eventos y configuracion (de la rama principal)
+# ----------------------------------------------------------------------
 
 #: Instante base de las sesiones sinteticas (epoch plausible, ver MIN_EPOCH).
 T0 = 1_750_000_000.0

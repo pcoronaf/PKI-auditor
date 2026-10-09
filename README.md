@@ -15,10 +15,111 @@ Y distingue rigurosamente entre **“no observé transmisión de la clave”** y
 **“la clave no puede transmitirse”**. Los reportes son conservadores,
 reproducibles y basados en evidencia.
 
-> **Estado: alfa funcional.** Los cuatro niveles, con sus cuatro sensores, se
-> ejecutan de extremo a extremo sobre las aplicaciones de laboratorio. Ver [Estado de implementación](#estado-de-implementación).
+> **Estado: completo y verificado contra el laboratorio.** Las pruebas
+> TC-001..TC-008 se ejecutan con un Chromium real y comparan cada hallazgo con
+> la verdad conocida del laboratorio; la interfaz gráfica se prueba contra el
+> núcleo de verdad. Ver
+> [Estado de implementación](#estado-de-implementación).
 
 Licencia: Apache-2.0.
+
+---
+
+## Uso
+
+```bash
+pip install -e .
+playwright install chromium     # o use --browser-path con un Chromium propio
+firmascope audit                # el asistente pregunta todo lo necesario
+```
+
+`firmascope audit` no exige ningún argumento. Si hay terminal, abre un asistente
+que pregunta el sitio, el nivel, el tipo de credencial y el aislamiento de red, y
+permite revisarlo y corregirlo antes de arrancar. **La URL puede omitirse**: se
+proporciona después con `url <dirección>`, o navegando en la ventana del
+navegador.
+
+```text
+firmascope audit [URL]        auditar un sitio
+firmascope audit URL --auto   auditar sin operador (sólo credencial sintética)
+firmascope options            listar las opciones configurables (--json para una GUI)
+firmascope credentials new    generar una credencial sintética de laboratorio
+firmascope rules [--json]     listar el catálogo (--rules DIR añade paquetes propios)
+firmascope labs list|serve    aplicaciones de laboratorio
+firmascope verify DIR         verificar la cadena de evidencias de un expediente
+```
+
+### Auditoría desatendida
+
+```bash
+firmascope audit https://portal.ejemplo.mx --auto --headless
+```
+
+El piloto automático recorre las mismas etapas que un operador: espera a que
+carguen los recursos, detecta el formulario de firma, lo rellena con la
+credencial sintética **con la red cortada**, y envía la firma con la red
+restablecida. Sirve para auditar un portal cada noche o tras cada despliegue, y
+ver si su comportamiento cambió.
+
+**Sólo funciona con credencial sintética**, y la CLI se niega en lugar de
+degradar. Rellenar automáticamente una e.firma real en un portal sin
+caracterizar sería entregar la clave sin que nadie vea a quién. Si el
+formulario no se reconoce, el piloto lo dice y la auditoría queda
+`INCONCLUSIVE` en lugar de afirmar nada.
+
+Los argumentos de línea de comandos siguen funcionando, pero **precargan** las
+respuestas del asistente en lugar de ser la única vía; `--no-interactive` no
+pregunta nada, para guiones. El esquema de opciones vive en un solo sitio
+(`firmascope.audit_core.options`) y lo renderizan tanto la CLI como, en su
+momento, la interfaz gráfica: añadir una opción no obliga a tocar cada interfaz.
+
+### Control durante la auditoría
+
+La auditoría avanza por etapas, y en cada una el operador decide:
+
+```text
+next / n     continuar          back / b    regresar de etapa
+retry / r    repetir            cancel / q  cancelar y cerrar el expediente
+url <URL>    abrir una página   offline / online   forzar el estado de red
+config       cambiar opciones modificables en marcha (aislamiento, permitidos)
+status       estado de la sesión    stages   lista de etapas
+```
+
+`next`, `back` y `cancel` son las tres acciones que una interfaz gráfica mapea a
+sus botones. Cancelar **no** descarta el expediente: una auditoría interrumpida
+sigue siendo evidencia de lo observado hasta ese punto, y se cierra como tal.
+
+El estado de red se **reconcilia desde la etapa**, no se aplica como un cambio
+incremental. Retroceder desde una etapa aislada restablece la red sin
+contabilidad adicional, y la sesión nunca termina dejando el navegador aislado.
+
+### Interfaz gráfica
+
+```bash
+cd gui/src-tauri && cargo build --release
+FIRMASCOPE_PYTHONPATH=../../src ./target/release/firmascope-gui
+```
+
+La ventana es un **panel de control** junto al navegador auditado: dice en qué
+etapa está, qué se ha observado y qué se concluye. El operador carga su `.key` y
+firma en el Chromium instrumentado, no en la interfaz — si la interfaz rellenara
+el formulario, estaría auditando un flujo que no es el que seguirá un usuario.
+
+La interfaz no decide nada: pinta el mismo esquema de opciones que el asistente
+de la CLI, y el núcleo valida. Habla con él por **JSON por línea sobre stdio**,
+no por un puerto local: FirmaScope maneja la e.firma del operador, y un puerto
+abierto es alcanzable por cualquier página que el usuario tenga abierta en
+cualquier navegador. Detalles en [`gui/README.md`](gui/README.md).
+
+### Credencial de prueba o credencial real
+
+Por defecto FirmaScope genera una credencial sintética de laboratorio, cuyo
+sujeto declara que **no** es un certificado del SAT. Para auditar un portal con
+la e.firma real del operador existe el modo `real`, que exige confirmación
+escrita y aplica un endurecimiento no negociable (sin cuerpos HTTP persistidos,
+con redacción de nombres de archivo e identificadores fiscales). El
+procedimiento y sus riesgos están en
+[`docs/real-credentials.md`](docs/real-credentials.md).
 
 ---
 
@@ -64,6 +165,53 @@ correcto debe hacer — se reportaría como exfiltración.
 
 ---
 
+## Los cuatro sensores
+
+Ninguno ve el cuadro completo, y por eso son cuatro:
+
+| Sensor | Qué aporta | Qué no puede ver |
+|---|---|---|
+| Instrumentación en la página | la **procedencia**: etiqueta el dato al leer el archivo y lo sigue por las APIs | la construcción de cadenas carácter a carácter |
+| CDP (DevTools) | la petición del navegador, con initiator y pila de llamadas | cuerpos que Chromium no materializa (multipart, flujos) |
+| Aislamiento de red | si la petición **llegó a salir**, porque es quien la aborta | nada de lo que ocurre dentro de la página |
+| Proxy (mitmproxy) | el **contenido exacto** que viajó, tras terminar el TLS | lo que no pasa por HTTP(S) |
+
+El caso que obliga a tener los cuatro es la subida del `.key` por
+`multipart/form-data`, el patrón más común de todos: CDP entrega el cuerpo
+vacío, así que sin proxy la afirmación «el `.key` salió» descansa sólo en la
+procedencia que el agente infiere. Con proxy se encuentra la representación del
+canario **dentro del cuerpo que viajó**, y la inferencia se convierte en prueba
+de contenido.
+
+El reverso también importa: una petición que el agente vio y el aislamiento
+abortó no salió, aunque tres sensores la hayan observado. El
+[motor de correlación](src/firmascope/correlation_engine/sensors.py) agrupa las
+observaciones de una misma petición y deja una sola conclusión, con una regla
+que no es estadística: *si un sensor con autoridad para negarla la negó, no
+salió*.
+
+Cada reporte declara qué sensores hubo. Un sensor ausente no produce hallazgos
+vacíos: produce preguntas sin responder, y el reporte lo dice.
+
+### Sobre la CA del proxy
+
+La CA es **efímera**: vive en un directorio temporal que se borra al cerrar la
+sesión, y el navegador la acepta sólo porque el contexto de Playwright se abre
+con `ignore_https_errors`. FirmaScope **no instala certificados en el almacén
+del sistema**, porque una CA de auditoría que sobrevive a la auditoría es una
+puerta abierta: quien obtenga su clave privada puede suplantar cualquier sitio
+para ese usuario.
+
+El addon se ejecuta **dentro del proceso** de FirmaScope, no como un
+`mitmdump -s` aparte. Para buscar los canarios hay que conocerlos, y los
+canarios son el material de la credencial: pasárselos a otro proceso por
+archivo, variable de entorno o socket sería sacar de la memoria exactamente lo
+que la herramienta promete no sacar. Cargado con `mitmdump -s` también
+funciona, pero sin vault — registra metadatos y digests, y no puede afirmar nada
+sobre el contenido.
+
+---
+
 ## Protección de secretos
 
 - Los secretos observados **no se escriben a disco**.
@@ -79,8 +227,10 @@ correcto debe hacer — se reportaría como exfiltración.
 ## Arquitectura
 
 ```text
-                       CLI / UI
-                          |
+            CLI (asistente)   GUI (Tauri)
+                    \            /
+                     \  JSON/stdio
+                      \        /
                   Audit Orchestrator
       Session Manager  Correlation Engine  Rule Engine
       Evidence Store   Report Generator
@@ -110,6 +260,7 @@ un *workspace* multi-paquete sin ganar acoplamiento:
 | `packages/evidence-store` | `firmascope.evidence_store` |
 | `packages/report-engine` | `firmascope.report_engine` |
 | `apps/cli` | `firmascope.cli` |
+| `apps/gui` | `gui/` (Tauri) + `firmascope.gui_bridge` |
 
 Otras desviaciones deliberadas respecto de la especificación:
 
@@ -128,105 +279,78 @@ Otras desviaciones deliberadas respecto de la especificación:
 
 | Componente | Estado |
 |---|---|
-| Modelo de eventos y etiquetas de procedencia | implementado, con pruebas |
-| Estados de conclusión | implementado, con pruebas |
-| Vault de secretos, canarios y redacción | implementado, con pruebas |
-| Configuración por niveles | implementado, con pruebas |
-| Expediente SQLite + cadena de hashes | implementado, con pruebas |
-| Agente de instrumentación (sources, WebCrypto, sinks, storage, workers) | implementado, con pruebas e2e |
-| Observación de red por CDP y clasificación de terceros | implementado, con pruebas e2e |
-| Controlador de navegador (perfil efímero, aislamiento de red, inventario de scripts) | implementado, con pruebas e2e |
-| Credenciales sintéticas | implementado, con pruebas |
-| Analizador estático (AST, taint interprocedural, source maps) | implementado, con pruebas |
-| Motor de reglas y catálogo `FS-*` (12 reglas) | implementado, con pruebas |
-| Motor de correlación | implementado, con pruebas |
-| Motor de reportes (HTML + JSON) | implementado, con pruebas |
-| CLI (`firmascope audit ...`) | implementado, con pruebas |
-| Aplicaciones de laboratorio | implementadas, con pruebas e2e |
-| Addon de mitmproxy (nivel 4, CA efímera) | implementado, con pruebas e2e |
-| Pruebas TC-001..TC-006 | **verdes** |
-
-La suíte son 179 pruebas unitarias más 14 extremo a extremo que lanzan un
-Chromium real contra las cinco aplicaciones de laboratorio (dos de ellas en
-nivel 4, con el proxy interpuesto):
+| Modelo de eventos y etiquetas de procedencia | implementado |
+| Estados de conclusión | implementado |
+| Vault de secretos, canarios y redacción | implementado |
+| Configuración por niveles y esquema de opciones | implementado |
+| Expediente SQLite + cadena de hashes | implementado |
+| Agente de instrumentación (sources, WebCrypto, sinks, storage, workers) | implementado |
+| Observación de red por CDP y clasificación de terceros | implementado |
+| Controlador de navegador (perfil efímero, aislamiento de red, inventario de scripts) | implementado |
+| Credenciales sintéticas y carga de la e.firma del operador | implementado |
+| Analizador estático (AST, taint interprocedural, source maps) | implementado |
+| Motor de reglas y catálogo `FS-*` (12 reglas) | implementado |
+| Motor de correlación de sensores | implementado |
+| Motor de reportes (HTML + JSON) | implementado |
+| CLI con asistente interactivo y piloto automático | implementado |
+| Addon de mitmproxy (interceptación TLS, nivel 4) | implementado |
+| Aplicaciones de laboratorio (5, con lógica) | implementado |
+| Interfaz gráfica (Tauri) | implementado |
+| Pruebas TC-001..TC-008, GUI y unitarias | implementado |
 
 ```bash
-pytest -m "not e2e"    # rápido, sin navegador
-pytest -m e2e          # TC-001..TC-006 sobre el laboratorio
+pip install -e ".[proxy,dev]"
+PYTHONPATH=src python3 -m pytest tests/ -q
+PYTHONPATH=src python3 -m pytest tests/ -q -m "not e2e"   # sin navegador
 ```
 
-### Comportamiento de referencia
+### Cómo se verifica
 
-Lo que la herramienta concluye hoy sobre cada aplicación de laboratorio:
+Las pruebas de extremo a extremo no comprueban que la herramienta diga algo:
+comprueban que diga **lo correcto**. El laboratorio levanta el portal y un
+recolector de terceros en el mismo proceso, y registra lo que recibe. Un informe
+que dice «la clave salió» es correcto sólo si el recolector la tiene; uno que
+dice «se impidió» es correcto sólo si no la tiene. Esa comparación con la verdad
+conocida es lo que separa una prueba de una ilusión.
 
-| Aplicación | Conclusión |
-|---|---|
-| `demo-safe` | sin hallazgos — firma local, sólo sale la firma |
-| `demo-key-exfiltration` | `FS-KEY-001` y `FS-PWD-001` OBSERVED |
-| `demo-encrypted-exfiltration` | `FS-NET-002` OBSERVED, `FS-KEY-002` POTENTIAL |
-| `demo-server-sign` | `FS-KEY-001` y `FS-PWD-001` OBSERVED |
-| `demo-static-only` | sólo `FS-CODE-001` POTENTIAL |
+Ejecutar la herramienta encontró cuatro defectos que el diseño no revelaba, y
+los cuatro están cubiertos por pruebas de regresión:
 
-Las dos filas que más dicen son la primera y la última. Que `demo-safe` no
-produzca ningún hallazgo es lo que hace utilizable al resto del catálogo: una
-herramienta que marca a las aplicaciones correctas no sirve para auditar
-ninguna. Y que `demo-static-only` produzca `POTENTIAL` sin producir
-`OBSERVED` es la separación entre los niveles 1 y 2: nada salió — eso es
-cierto — pero el código cargado puede hacerlo.
+1. **Un intento bloqueado se reportaba como clave enviada.** Una misma petición
+   la ven varios sensores y sólo el aislamiento sabe que la abortó. Con una
+   e.firma real, el error llevaba a revocar un certificado sin motivo.
+2. **El patrón canónico de exfiltración no producía ninguna ruta estática**,
+   porque la fuente se descartaba cuando su tipo no podía deducirse del nombre
+   de la expresión — y `input.files[0] -> FileReader -> btoa -> fetch` no nombra
+   la clave en ninguna parte.
+3. **La subida del `.key` por `multipart/form-data` no se detectaba.**
+   `FormData.append` no guarda el objeto etiquetado sino un `File` nuevo con los
+   mismos bytes, así que la procedencia se perdía justo antes del envío; y como
+   CDP entrega ese cuerpo vacío, tampoco había forma de probarlo por contenido.
+   Lo primero se corrigió en la instrumentación y el análisis estático; lo
+   segundo es lo que resuelve el proxy.
 
-`demo-encrypted-exfiltration` merece una nota. El seguimiento de procedencia
-no atraviesa un bucle que construye una cadena carácter a carácter, así que
-FirmaScope **no** afirma haber seguido el dato hasta la salida. Afirma lo que
-sí sostiene: que salió un cuerpo opaco después del acceso a la clave, y que
-el código contiene la ruta. Esa es la respuesta honesta, y es deliberado que
-no sea la más contundente.
+4. **La interfaz no pintaba el reporte al terminar.** Una acción de etapa que
+   cierra el recorrido llama a `finish` dentro de sí misma, y el bloqueo de
+   botones usaba una bandera en lugar de contar anidamientos: la llamada
+   interior se descartaba en silencio. La auditoría terminaba bien y el
+   expediente quedaba escrito, pero el operador no veía nada.
 
-## Uso
+### Límites conocidos
 
-```bash
-pip install -e .
+- El seguimiento de procedencia en página no puede atravesar la construcción de
+  cadenas carácter a carácter (`binary += String.fromCharCode(bytes[i])`): un
+  número no transporta procedencia. Cuando ocurre, la salida se reporta como
+  binario sin clasificar y la ruta estática sigue estando.
+- El código minificado, el despacho dinámico, `eval` y WebAssembly pueden
+  ocultar flujos que existen. **Ausencia de rutas no es ausencia de capacidad.**
+- El aislamiento intercepta peticiones HTTP; un WebSocket abierto antes del
+  corte no se aborta por esa vía.
+- El proxy ve lo que pasa por HTTP(S). Un sitio con *certificate pinning*
+  rechazará la CA efímera, y ese destino queda sin observar: el reporte lo
+  registra como fallo de TLS en lugar de presentarlo como ausencia de tráfico.
 
-firmascope credentials new -o creds     # credenciales sintéticas de laboratorio
-firmascope labs serve                   # http://127.0.0.1:8000
-firmascope audit http://127.0.0.1:8000/demo-key-exfiltration/ --level 3
-firmascope rules                        # catálogo de reglas
-firmascope verify audits/FS-XXXX-XXXX   # cadena de integridad del expediente
-```
-
-En modo `synthetic` (el de por defecto) FirmaScope genera un par .key/.cer de
-laboratorio, lo registra en el vault —de modo que cada representación
-buscable queda disponible como canario— y lo entrega al formulario del sitio.
-Si no reconoce el formulario lo dice y sugiere `--headed`, para que el
-operador conduzca la sesión a mano: rellenar el formulario equivocado sería
-peor que no rellenar ninguno.
-
-
-### El proxy (nivel 4)
-
-La instrumentación ve lo que el JavaScript *pide* enviar; CDP, lo que el
-navegador *dice* que envía. El proxy ve lo que efectivamente sale por el
-cable, ya codificado: el multipart con sus fronteras, el cuerpo tras la
-compresión, los frames de WebSocket. Es el único sensor que no depende de la
-cooperación del navegador, y por eso su coincidencia con los otros dos es la
-corroboración más valiosa del expediente. En `demo-server-sign` las tres
-vistas de la subida se funden en **una** cadena, sostenida por agente, CDP,
-proxy y el canario del `.key` encontrado en bruto dentro del multipart.
-
-```bash
-pip install -e ".[proxy]"
-firmascope audit <url> --level 4              # proxy activo si está instalado
-firmascope audit <url> --level 4 --no-proxy   # tres sensores
-```
-
-- **CA efímera.** La autoridad certificadora de mitmproxy se genera en un
-  directorio temporal por sesión y se borra al terminar. Nunca se instala en
-  el almacén del sistema: sólo la acepta el contexto del navegador de
-  auditoría, que muere con la sesión.
-- **Degradación explícita.** Sin mitmproxy instalado, el nivel 4 sigue con
-  tres sensores y el manifiesto lo dice. Nunca se finge un sensor que no
-  corrió.
-- **Sin cuerpos por defecto.** El proxy busca canarios en memoria y registra
-  tamaños y digests. `Authorization` y `Cookie` se omiten del expediente.
+---
 
 ## Documentación
 
@@ -234,6 +358,25 @@ firmascope audit <url> --level 4 --no-proxy   # tres sensores
   integridad y protección de secretos.
 - [`docs/rule-development.md`](docs/rule-development.md) — catálogo de reglas,
   cómo escribir una nueva y cómo elegir el estado de conclusión.
+- [`docs/real-credentials.md`](docs/real-credentials.md) — procedimiento, riesgos
+  residuales y qué hacer si el hallazgo confirma la fuga.
+- [`gui/README.md`](gui/README.md) — interfaz gráfica, el protocolo del puente y
+  por qué el canal es stdio y no un puerto.
+
+### Laboratorio
+
+Cinco aplicaciones que reproducen las arquitecturas que importan: firma local
+correcta, exfiltración de la clave, exfiltración cifrada, firma en el servidor y
+código capaz de exfiltrar que no se ejecuta.
+
+```bash
+PYTHONPATH=src python3 -m firmascope.labs.server    # portal 8765, recolector 8766
+firmascope credentials new --output /tmp/efirma
+firmascope audit http://127.0.0.1:8765/demo-key-exfiltration/
+```
+
+El recolector es un **origen distinto** a propósito: es lo que da algo que
+clasificar al detector de terceros y algo que bloquear al aislamiento.
 
 ---
 
@@ -245,8 +388,12 @@ playwright      control del navegador y CDP
 cryptography    credenciales sintéticas
 PyYAML          paquetes de reglas
 tree-sitter     análisis estático de JavaScript
-mitmproxy       opcional, nivel 4
+mitmproxy       opcional, interceptación TLS del nivel 4
 ```
+
+Sin mitmproxy, el nivel 4 funciona con tres sensores y el reporte declara que
+falta el cuarto. Para exigirlo en lugar de degradar, elija «Siempre» en la
+opción *Interceptación TLS con proxy*: la auditoría no arranca si no está.
 
 FirmaScope busca un Chromium ya instalado (variable `FIRMASCOPE_CHROMIUM_PATH`,
 `PLAYWRIGHT_BROWSERS_PATH` o `/opt/pw-browsers`) antes de recurrir al de
@@ -257,5 +404,16 @@ Playwright.
 ## Advertencia de uso
 
 FirmaScope es una herramienta **defensiva**. Está pensada para auditar sitios
-propios o sitios sobre los que se tiene autorización de prueba, usando
-credenciales sintéticas de laboratorio. No la uses con tu e.firma real.
+propios o sitios sobre los que se tiene autorización de prueba.
+
+Use credenciales sintéticas de laboratorio siempre que pueda: caracterizan el
+portal sin exponer nada. El modo `real` existe porque hay un caso legítimo en
+que eso no basta — el operador tiene que firmar en ese portal de todas formas y
+necesita saber qué hace con su clave — y está sujeto a confirmación escrita y a
+restricciones que no se pueden desactivar.
+
+Lo que ese modo **no** puede hacer es proteger la credencial: FirmaScope observa,
+no bloquea. Si el sitio transmite la clave, el hallazgo llega después de que haya
+salido. Audite primero con la credencial sintética, firme dentro de la etapa
+aislada, y lea [`docs/real-credentials.md`](docs/real-credentials.md) antes de
+decidir.

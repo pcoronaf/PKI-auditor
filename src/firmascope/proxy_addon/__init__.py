@@ -1,10 +1,11 @@
 """Integracion opcional con mitmproxy: el sensor de red de nivel 4.
 
 mitmproxy es una dependencia opcional (``pip install 'firmascope[proxy]'``).
-Este paquete se importa sin ella; solo ``ProxyServer.start`` la exige.
+Este paquete se importa sin ella; solo :meth:`ProxyRunner.start` la exige.
 """
 
-from .addon import FirmaScopeAddon, ProxyRecord
-from .server import ProxyServer, ProxyUnavailable, available
+from .addon import FirmaScopeAddon, ProxyObservation, ProxyUpdate
+from .runner import ProxyRunner, available, version
 
-__all__ = ["FirmaScopeAddon", "ProxyRecord", "ProxyServer", "ProxyUnavailable", "available"]
+__all__ = ["FirmaScopeAddon", "ProxyObservation", "ProxyRunner", "ProxyUpdate",
+           "available", "version"]

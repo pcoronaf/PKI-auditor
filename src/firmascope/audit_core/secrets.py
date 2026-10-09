@@ -52,6 +52,43 @@ FORBIDDEN_KEYS = frozenset(
 #: Longitud maxima de cualquier cadena persistida dentro de ``Event.data``.
 MAX_STRING = 512
 
+#: Nombres de archivo de material criptografico. Se redactan conservando la
+#: extension, porque saber que era un ``.key`` es evidencia y el nombre no.
+CREDENTIAL_FILE_PATTERN = re.compile(
+    r"^\s*(?:.*[\\/])?(.+?)(\.(?:key|cer|crt|cert|pem|p12|pfx|der|p8))\s*$", re.I)
+
+#: RFC mexicano (persona fisica o moral). El nombre de archivo de una e.firma
+#: del SAT lo contiene, de modo que publicarlo identificaria al titular.
+RFC_PATTERN = re.compile(r"\b[A-Z&N]{3,4}\d{6}[A-Z0-9]{3}\b", re.I)
+
+#: CURP, por si aparece en un formulario de firma.
+CURP_PATTERN = re.compile(r"\b[A-Z]{4}\d{6}[HM][A-Z]{5}[A-Z0-9]\d\b", re.I)
+
+#: Claves cuyo valor es un digest global. En modo real se sustituyen por un
+#: fingerprint HMAC de sesion: sirve igual para correlacionar dentro de la
+#: auditoria, pero no vincula el expediente con una persona concreta.
+DIGEST_KEYS = frozenset({"sha256", "key_sha256", "cert_sha256", "body_digest", "digest"})
+
+#: Cadenas que no deben pasar por el detector de identificadores: un digest o
+#: un fingerprint puede contener por azar algo con forma de RFC.
+_OPAQUE_VALUE = re.compile(r"^(?:fp:)?[0-9a-f]{24,}$", re.I)
+
+
+def redact_filename(value: str) -> str | None:
+    """Devuelve ``<redactado.key>`` si el valor parece un archivo de credencial."""
+    match = CREDENTIAL_FILE_PATTERN.match(value)
+    if match is None:
+        return None
+    return f"<redactado{match.group(2).lower()}>"
+
+
+def redact_personal_ids(value: str) -> str:
+    """Sustituye RFC y CURP dentro de un texto libre."""
+    if _OPAQUE_VALUE.match(value.strip()):
+        return value
+    value = RFC_PATTERN.sub("<redactado:rfc>", value)
+    return CURP_PATTERN.sub("<redactado:curp>", value)
+
 
 @dataclass(frozen=True)
 class Representation:
@@ -240,32 +277,55 @@ def looks_like_private_key(blob: bytes) -> bool:
     return blob[:1] == b"\x30" and len(blob) > 256
 
 
-def redact(data: dict, vault: SecretVault | None = None) -> dict:
+def redact(data: dict, vault: SecretVault | None = None, privacy=None) -> dict:
     """Devuelve una copia segura de ``data`` apta para persistirse.
 
     - elimina claves de la denylist;
     - trunca cadenas largas;
-    - sustituye cualquier aparicion de un canario por un marcador.
+    - sustituye cualquier aparicion de un canario por un marcador;
+    - con una :class:`~firmascope.audit_core.config.PrivacyPolicy` activa,
+      redacta nombres de archivo de credenciales, identificadores fiscales y
+      digests globales.
+
+    La deteccion de nombres de archivo es por *contenido*, no por nombre de
+    clave: asi se redacta ``FIEL_XAXX010101000.key`` sin tocar campos legitimos
+    como el ``name`` de un checkpoint.
     """
 
-    def clean_value(value):
+    redact_names = bool(privacy is not None and getattr(privacy, "redact_filenames", False))
+    redact_ids = bool(privacy is not None and getattr(privacy, "redact_personal_ids", False))
+    hide_digests = bool(privacy is not None
+                        and not getattr(privacy, "publish_global_digests", True))
+
+    def clean_value(value, key: str = ""):
         if isinstance(value, str):
             if vault is not None and vault.alive:
                 labels = vault.labels_in(value)
                 if labels:
                     return "<canary:" + ",".join(sorted(labels)) + ">"
+            if hide_digests and key.lower() in DIGEST_KEYS and value:
+                if vault is not None and vault.alive:
+                    return vault.fingerprint(value)
+                return "<redactado:digest>"
+            if redact_names:
+                as_file = redact_filename(value)
+                if as_file is not None:
+                    return as_file
+            if redact_ids:
+                value = redact_personal_ids(value)
             if len(value) > MAX_STRING:
                 return value[:MAX_STRING] + f"...<truncated {len(value)} bytes>"
             return value
         if isinstance(value, (int, float, bool)) or value is None:
             return value
         if isinstance(value, dict):
-            return {k: clean_value(v) for k, v in value.items() if k.lower() not in FORBIDDEN_KEYS}
+            return {k: clean_value(v, k) for k, v in value.items()
+                    if k.lower() not in FORBIDDEN_KEYS}
         if isinstance(value, (list, tuple)):
-            return [clean_value(v) for v in value][:200]
-        return clean_value(str(value))
+            return [clean_value(v, key) for v in value][:200]
+        return clean_value(str(value), key)
 
-    return {k: clean_value(v) for k, v in data.items() if k.lower() not in FORBIDDEN_KEYS}
+    return {k: clean_value(v, k) for k, v in data.items() if k.lower() not in FORBIDDEN_KEYS}
 
 
 def assert_no_secrets(payload: str, vault: SecretVault | None) -> None:

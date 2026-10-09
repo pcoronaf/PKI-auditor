@@ -1,22 +1,30 @@
 /*
- * demo-safe — comportamiento correcto.
+ * demo-safe: la arquitectura correcta.
  *
- * La clave privada se descifra y se usa dentro del navegador. Al servicio solo
- * viaja el producto legitimo de la operacion: la firma y el certificado, que
- * es material publico.
+ * La clave privada se descifra y se usa dentro del navegador. Lo unico que
+ * cruza la red es la firma y el certificado, que son publicos por definicion.
  *
- * Resultado esperado de la auditoria:
- *   FS-KEY-001 / FS-KEY-002 / FS-PWD-001 / FS-PWD-002 -> NOT_OBSERVED
- *   FS-LOCAL-001 -> CONFIRMED con la red aislada (nivel 3)
+ * Es el caso que FirmaScope debe declarar NOT_OBSERVED en FS-KEY-001,
+ * FS-KEY-002 y FS-PWD-001, y CONFIRMED en FS-LOCAL-001: la firma se genera con
+ * la red aislada, asi que no pudo necesitar al servidor para producirla.
  */
 
-labMain(async function (keyBytes, password, cerBytes) {
-  const loaded = await loadPrivateKey(keyBytes, password);
-  log('clave privada importada (no extraible)');
+labSetup({
+  onSign: async function (state, documentText) {
+    const keyBytes = await readFile(state.key);
+    const cerBytes = await readFile(state.cer);
 
-  const signature = await signDocument(loaded.key, LAB_DOCUMENT);
-  log('documento firmado localmente (' + signature.byteLength + ' bytes)');
+    const loaded = await loadPrivateKey(keyBytes, state.password);
+    log('clave privada importada (no extraible)');
 
-  await entregarFirma(signature, cerBytes);
-  setStatus('Firmado localmente. Solo se envio la firma.', 'ok');
+    const signature = await signDocument(loaded.key, documentText);
+    log('firma generada: ' + signature.byteLength + ' bytes');
+
+    return { signature: signature, certificate: cerBytes };
+  },
+  onSubmit: async function (pending) {
+    const ok = await labSubmitSignature(pending);
+    log('enviado al servidor: firma + certificado, nada mas');
+    return ok;
+  }
 });

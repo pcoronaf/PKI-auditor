@@ -32,6 +32,24 @@ MAX_CALL_CHAIN = 5
 
 PRIVATE_LABELS = frozenset(t.value for t in PRIVATE_TAGS)
 
+#: Etiqueta de relleno para el material que entra por una fuente reconocida sin
+#: que su tipo pueda deducirse del codigo.
+UNCLASSIFIED = Tag.UNCLASSIFIED.value
+
+
+def _seed_labels(labels: Iterable[str]) -> frozenset[str]:
+    """Etiquetas con que sembrar una fuente reconocida.
+
+    Una fuente del catalogo es material sensible entrando en el programa,
+    *aunque* el nombre de la expresion no revele de que tipo es. Descartarla por
+    no poder tipificarla es el error que hace invisible el patron canonico de
+    exfiltracion: ``input.files[0]`` -> ``FileReader`` -> ``fetch`` no menciona
+    la palabra "key" en ninguna parte. Se siembra como UNCLASSIFIED, que el
+    motor de reglas reporta como material sin clasificar y nunca como la clave.
+    """
+    concrete = frozenset(labels) - {UNCLASSIFIED}
+    return concrete or frozenset({UNCLASSIFIED})
+
 
 # ----------------------------------------------------------------------
 # Valores de taint
@@ -60,9 +78,23 @@ class TaintValue:
     transforms: tuple[str, ...] = ()
     derived: bool = False
 
+    def __post_init__(self) -> None:
+        # UNCLASSIFIED es el relleno que marca "material sensible cuyo tipo no
+        # pudimos determinar". En cuanto se conoce una etiqueta concreta deja de
+        # aportar nada, y mantenerla produciria hallazgos que se contradicen a
+        # si mismos ("UNCLASSIFIED+KEY_FILE"). Se normaliza en la construccion
+        # para que ninguna ruta de propagacion tenga que recordarlo.
+        if len(self.labels) > 1 and UNCLASSIFIED in self.labels:
+            object.__setattr__(self, "labels", self.labels - {UNCLASSIFIED})
+
     @property
     def empty(self) -> bool:
         return not self.labels
+
+    @property
+    def unclassified(self) -> bool:
+        """El material entro por una API reconocida, pero no se pudo tipificar."""
+        return self.labels == frozenset({UNCLASSIFIED})
 
     @property
     def private(self) -> bool:
@@ -413,6 +445,14 @@ class ScriptAnalysis:
                 taint = self._taint_of(value, fn) if value is not None else EMPTY
                 if taint.empty:
                     taint = self._name_seed(name, target)
+                elif taint.unclassified:
+                    # El valor entro por una fuente reconocida pero sin tipificar.
+                    # El nombre de la variable es precisamente la pista que falta:
+                    # `keyBytes` dice que esos bytes son el .key. Refina la
+                    # etiqueta sin inventarse el origen, que sigue siendo la API.
+                    seed = self._name_seed(name, target)
+                    if not seed.empty:
+                        taint = taint.with_labels(seed.labels)
                 self._assign(fn, name, taint)
         elif kind in ("assignment_expression", "augmented_assignment_expression"):
             self._visit_assignment(node, fn)
@@ -693,13 +733,12 @@ class ScriptAnalysis:
             catalog.SOURCE_PROPERTIES, prop_name,
             parser.text(obj, self.source) if obj is not None else "")
         if pattern is not None:
-            labels = set(pattern.labels) | catalog.infer_labels(full_text)
-            if labels:
-                return base.merge(TaintValue(
-                    labels=frozenset(labels),
-                    origin=SourceRef(pattern.name, "api", parser.line_of(node),
-                                     parser.snippet(node, self.source)),
-                ))
+            labels = _seed_labels(set(pattern.labels) | catalog.infer_labels(full_text))
+            return base.merge(TaintValue(
+                labels=labels,
+                origin=SourceRef(pattern.name, "api", parser.line_of(node),
+                                 parser.snippet(node, self.source)),
+            ))
         # El acceso a miembro hereda la procedencia del objeto: `loaded.pkcs8`,
         # `reader.result` o `files[0]` siguen siendo el mismo material.
         return base
@@ -742,8 +781,8 @@ class ScriptAnalysis:
             if member_name == "decrypt" and Tag.KEY_FILE.value in incoming.labels:
                 # .key cifrado + contrasena -> clave privada en claro
                 labels.add(Tag.PRIVATE_KEY.value)
-            if incoming.empty and labels:
-                return TaintValue(labels=frozenset(labels), origin=source)
+            if incoming.empty:
+                return TaintValue(labels=_seed_labels(labels), origin=source)
             if not incoming.empty:
                 value = incoming.through(pattern.name, derived=catalog.obscures(pattern.name))
                 if value.origin is None:

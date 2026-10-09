@@ -54,6 +54,16 @@ SUBMIT_SELECTORS = (
     "input[type=submit]",
 )
 
+#: Boton que *envia* la firma ya generada, cuando el sitio separa firmar de
+#: enviar. Es la separacion que permite firmar con la red cortada y enviar
+#: despues, asi que se busca aparte y solo en la etapa de envio.
+SEND_SELECTORS = (
+    "#submit:not([disabled])",
+    "#send:not([disabled])",
+    "#enviar:not([disabled])",
+)
+SEND_TEXTS = ("enviar firma", "enviar", "send", "submit")
+
 
 @dataclass
 class DetectedForm:
@@ -156,6 +166,31 @@ def submit(page: Any, form: DetectedForm) -> bool:
         return False
     try:
         form.submit.click(timeout=5_000)
+        return True
+    except Exception:
+        return False
+
+
+def send(page: Any) -> bool:
+    """Pulsa el boton que envia una firma ya generada, si el sitio lo tiene.
+
+    Muchos portales firman y envian en un solo clic, y entonces no hay nada que
+    pulsar aqui: devolver ``False`` no es un error, es la descripcion del sitio.
+    """
+    button = _first_visible(page, SEND_SELECTORS)
+    if button is None:
+        for text in SEND_TEXTS:
+            try:
+                locator = page.get_by_role("button", name=text, exact=False).first
+                if locator.count() > 0 and locator.is_enabled():
+                    button = locator
+                    break
+            except Exception:
+                continue
+    if button is None:
+        return False
+    try:
+        button.click(timeout=5_000)
         return True
     except Exception:
         return False

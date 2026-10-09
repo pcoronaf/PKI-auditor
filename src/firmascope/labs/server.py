@@ -1,253 +1,196 @@
 """Servidor de las aplicaciones de laboratorio.
 
-Sirve las cinco demos y los endpoints que necesitan para comportarse como
-aplicaciones reales:
+Levanta dos servidores en el mismo proceso:
 
-``/api/sign-receipt``   recibe la firma. Lo que todo sitio correcto hace.
-``/api/server-sign``    recibe el .key y la contrasena, y firma en el servidor.
-``/collect/...``        recolector de las demos que exfiltran.
+* el *portal* (puerto 8765), que sirve las cinco aplicaciones;
+* el *recolector* (puerto 8766), un tercero distinto que recibe lo que las
+  aplicaciones maliciosas exfiltran.
 
-Nada de lo recibido se escribe a disco. El servidor cuenta lo que llego y
-descarta el contenido: un laboratorio que persistiera claves privadas seria
-peor que el problema que ayuda a estudiar.
+Son dos origenes separados a proposito: es lo que permite que el clasificador
+de terceros de FirmaScope tenga algo que clasificar, y lo que hace que el
+aislamiento de red tenga un destino que bloquear.
+
+El recolector *registra* lo recibido para que las pruebas puedan comprobar que
+la exfiltracion ocurrio de verdad, y nunca lo persiste en disco.
 """
 
 from __future__ import annotations
 
-import base64
 import json
-import re
 import threading
-from dataclasses import dataclass, field
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from functools import partial
+from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-APPS_DIR = Path(__file__).parent / "apps"
+APPS = Path(__file__).parent / "apps"
+PORTAL_PORT = 8765
+COLLECTOR_PORT = 8766
 
-#: Nombres de las demos empaquetadas.
-DEMOS = (
-    "demo-safe",
-    "demo-key-exfiltration",
-    "demo-encrypted-exfiltration",
-    "demo-server-sign",
-    "demo-static-only",
-)
+#: Banderas que sirve el portal. ``demo-static-only`` las consulta: ponerlas a
+#: cierto convierte su ruta estatica en una exfiltracion observada, que es como
+#: se comprueba que el nivel 1 y el nivel 2 coinciden cuando deben.
+FLAGS: dict[str, Any] = {"collectKeyMaterial": False}
 
 
-@dataclass
-class Received:
-    """Contador de lo que llego a cada endpoint, sin guardar el contenido."""
+class PortalHandler(SimpleHTTPRequestHandler):
+    """Sirve las aplicaciones y responde a sus endpoints."""
 
-    receipts: int = 0
-    server_signs: int = 0
-    collected: list[dict[str, Any]] = field(default_factory=list)
+    def log_message(self, fmt: str, *args: Any) -> None:  # silencio
+        pass
 
-    def note_collection(self, path: str, size: int) -> None:
-        self.collected.append({"path": path, "bytes": size})
+    def _json(self, status: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-
-class LabHandler(SimpleHTTPRequestHandler):
-    """Maneja los ficheros estaticos y los endpoints del laboratorio."""
-
-    received: Received
-    quiet = True
-
-    def log_message(self, fmt: str, *args) -> None:  # pragma: no cover - ruido
-        if not self.quiet:
-            super().log_message(fmt, *args)
-
-    # -- rutas -----------------------------------------------------------
-    def translate_path(self, path: str) -> str:
-        clean = path.split("?", 1)[0].split("#", 1)[0]
-        relative = clean.lstrip("/")
-        if not relative:
-            return str(APPS_DIR / "index.html")
-        target = (APPS_DIR / relative).resolve()
-        # Impide salir del directorio de las aplicaciones.
-        if not str(target).startswith(str(APPS_DIR.resolve())):
-            return str(APPS_DIR)
-        if target.is_dir():
-            return str(target / "index.html")
-        return str(target)
-
-    def do_GET(self) -> None:
-        if self.path.split("?")[0] in ("/", "/index.html"):
-            self._send(200, "text/html; charset=utf-8", _index_page().encode("utf-8"))
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path.startswith("/api/flags"):
+            self._json(200, FLAGS)
             return
-        if self.path.split("?")[0] == "/__lab/received":
-            self._send(200, "application/json",
-                       json.dumps(self.received.__dict__, default=str).encode("utf-8"))
+        if self.path == "/":
+            apps = sorted(p.name for p in APPS.iterdir()
+                          if p.is_dir() and p.name.startswith("demo-"))
+            links = "".join(f'<li><a href="/{name}/">{name}</a></li>' for name in apps)
+            body = (f"<!doctype html><meta charset=utf-8>"
+                    f"<title>FirmaScope lab</title>"
+                    f"<h1>Aplicaciones de laboratorio</h1>"
+                    f"<p><strong>No use credenciales reales.</strong> Varias de estas "
+                    f"aplicaciones envian la clave a un tercero a proposito. Use la "
+                    f"credencial sintetica de <code>firmascope credentials new</code>.</p>"
+                    f"<ul>{links}</ul>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         super().do_GET()
 
-    def do_POST(self) -> None:
-        path = self.path.split("?", 1)[0]
+    def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
-
-        if path == "/api/sign-receipt":
-            self.received.receipts += 1
-            self._json(200, {"status": "ok", "bytes": len(body)})
+        if self.path.startswith("/api/sign-server-side"):
+            # El portal recibe la clave y la usa. Firmar de verdad es lo que
+            # hace concreto el riesgo de esta arquitectura: un servidor que
+            # tiene el .key y la contrasena puede firmar cuando quiera, no solo
+            # cuando el titular se lo pide. La clave no se guarda: el
+            # laboratorio no necesita conservarla para demostrarlo.
+            result = _sign_server_side(self.headers.get("Content-Type", ""), body)
+            SERVER_SIDE.append({"bytes": len(body), "signed": "signature" in result})
+            self._json(200 if "signature" in result else 400, result)
             return
-
-        if path == "/api/server-sign":
-            self.received.server_signs += 1
-            self._json(200, _server_sign(body, self.headers.get("Content-Type", "")))
+        if self.path.startswith("/api/submit"):
+            self._json(200, {"accepted": True})
             return
-
-        if path.startswith("/collect"):
-            # El recolector de las demos inseguras: cuenta y descarta.
-            self.received.note_collection(path, len(body))
-            self._json(200, {"status": "ok"})
-            return
-
-        self._json(404, {"error": "endpoint desconocido"})
-
-    # -- utilidades -------------------------------------------------------
-    def _send(self, code: int, content_type: str, payload: bytes) -> None:
-        self.send_response(code)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def _json(self, code: int, payload: dict[str, Any]) -> None:
-        self._send(code, "application/json", json.dumps(payload).encode("utf-8"))
+        self._json(404, {"error": "no such endpoint"})
 
 
-# ----------------------------------------------------------------------
-# Firma en el servidor (demo-server-sign)
-# ----------------------------------------------------------------------
+#: Peticiones de firma del lado servidor, para las pruebas.
+SERVER_SIDE: list[dict[str, Any]] = []
 
-def _server_sign(body: bytes, content_type: str) -> dict[str, Any]:
-    """Firma con la clave que el navegador acaba de subir.
 
-    Que esto funcione es justamente lo que hace peligroso al patron: el
-    servidor demuestra tener todo lo necesario para firmar en nombre del
-    titular, ahora y cuando quiera.
-    """
+def _multipart_fields(content_type: str, body: bytes) -> dict[str, bytes]:
+    """Campos de un cuerpo multipart/form-data, con la biblioteca estandar."""
+    from email.parser import BytesParser
+    from email.policy import HTTP
+
+    message = BytesParser(policy=HTTP).parsebytes(
+        f"Content-Type: {content_type}\r\n\r\n".encode() + body)
+    fields: dict[str, bytes] = {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if name:
+            fields[str(name)] = part.get_payload(decode=True) or b""
+    return fields
+
+
+def _sign_server_side(content_type: str, body: bytes) -> dict[str, Any]:
+    """Firma el documento con la clave que subio el navegador."""
+    import base64
+
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    if "multipart/form-data" not in content_type:
+        return {"error": "se esperaba multipart/form-data"}
+    fields = _multipart_fields(content_type, body)
+    key_der = fields.get("private_key") or fields.get("key")
+    password = fields.get("key_password") or fields.get("password")
+    document = fields.get("document", b"")
+    if not key_der or password is None:
+        return {"error": "faltan la clave o la contrasena"}
     try:
-        parts = _parse_multipart(body, content_type)
-        key_bytes = parts.get("key", b"")
-        password = parts.get("password", b"")
-        document = parts.get("document", b"")
-        if not key_bytes or not password:
-            return {"error": "faltan la clave o la contrasena"}
-
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import padding
-
-        private_key = serialization.load_der_private_key(key_bytes, password=password)
-        signature = private_key.sign(document, padding.PKCS1v15(), hashes.SHA256())
-        return {
-            "signature": base64.b64encode(signature).decode("ascii"),
-            "signed_by": "servidor",
-        }
+        key = serialization.load_der_private_key(key_der, password=password.strip())
+        signature = key.sign(document, padding.PKCS1v15(), hashes.SHA256())
     except Exception as exc:
-        return {"error": f"{type(exc).__name__}: {exc}"}
+        return {"error": f"no se pudo firmar: {type(exc).__name__}"}
+    return {"signed": True, "where": "server",
+            "signature": base64.b64encode(signature).decode()}
+#: Lo que recibio el recolector, para las pruebas.
+COLLECTED: list[dict[str, Any]] = []
 
 
-_BOUNDARY = re.compile(r'boundary="?([^";]+)"?', re.I)
-_DISPOSITION = re.compile(rb'name="([^"]*)"')
+class CollectorHandler(BaseHTTPRequestHandler):
+    """El tercero que recibe la exfiltracion."""
 
-
-def _parse_multipart(body: bytes, content_type: str) -> dict[str, bytes]:
-    """Parser minimo de ``multipart/form-data``.
-
-    Solo cubre lo que las demos envian. No pretende ser un parser general.
-    """
-    match = _BOUNDARY.search(content_type or "")
-    if not match:
-        return {}
-    delimiter = b"--" + match.group(1).encode("ascii")
-    out: dict[str, bytes] = {}
-    for chunk in body.split(delimiter):
-        if not chunk.strip() or chunk.strip() == b"--":
-            continue
-        head, _, payload = chunk.partition(b"\r\n\r\n")
-        name = _DISPOSITION.search(head)
-        if not name:
-            continue
-        out[name.group(1).decode("utf-8", "replace")] = payload.rstrip(b"\r\n")
-    return out
-
-
-# ----------------------------------------------------------------------
-# Indice
-# ----------------------------------------------------------------------
-
-def _index_page() -> str:
-    items = "".join(
-        f'<li><a href="/{demo}/">{demo}</a></li>' for demo in DEMOS if (APPS_DIR / demo).is_dir()
-    )
-    return (
-        '<!doctype html><html lang="es"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        "<title>Laboratorio de FirmaScope</title>"
-        '<link rel="stylesheet" href="/shared/lab.css"></head><body><main>'
-        "<h1>Laboratorio de FirmaScope</h1>"
-        '<p class="warn">Aplicaciones de prueba. No uses credenciales reales: '
-        "genera unas sinteticas con <code>firmascope credentials new</code>.</p>"
-        f"<ul>{items}</ul></main></body></html>"
-    )
-
-
-# ----------------------------------------------------------------------
-# Arranque
-# ----------------------------------------------------------------------
-
-class LabServer:
-    """Servidor de laboratorio con ciclo de vida explicito."""
-
-    def __init__(self, host: str = "127.0.0.1", port: int = 0, quiet: bool = True):
-        self.received = Received()
-        handler = type("BoundLabHandler", (LabHandler,),
-                       {"received": self.received, "quiet": quiet})
-        self.httpd = HTTPServer((host, port), handler)
-        self.thread: threading.Thread | None = None
-
-    @property
-    def port(self) -> int:
-        return int(self.httpd.server_address[1])
-
-    @property
-    def base_url(self) -> str:
-        host, port = self.httpd.server_address[0], self.port
-        return f"http://{host}:{port}"
-
-    def start(self) -> "LabServer":
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-        self.thread.start()
-        return self
-
-    def stop(self) -> None:
-        self.httpd.shutdown()
-        self.httpd.server_close()
-        if self.thread is not None:
-            self.thread.join(timeout=5)
-
-    def url_for(self, demo: str, **params: str) -> str:
-        query = "&".join(f"{k}={v}" for k, v in params.items())
-        return f"{self.base_url}/{demo}/" + (f"?{query}" if query else "")
-
-    def __enter__(self) -> "LabServer":
-        return self.start()
-
-    def __exit__(self, *exc) -> None:
-        self.stop()
-
-
-def serve(host: str = "127.0.0.1", port: int = 8000, quiet: bool = False) -> None:
-    """Arranca el laboratorio en primer plano (``firmascope labs serve``)."""
-    server = LabServer(host, port, quiet=quiet)
-    print(f"Laboratorio de FirmaScope en {server.base_url}")
-    print("Aplicaciones: " + ", ".join(DEMOS))
-    print("Ctrl-C para detener.")
-    try:
-        server.httpd.serve_forever()
-    except KeyboardInterrupt:
+    def log_message(self, fmt: str, *args: Any) -> None:
         pass
+
+    def _record(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        COLLECTED.append({
+            "method": self.command,
+            "path": self.path,
+            "size": len(body),
+            "content_type": self.headers.get("Content-Type", ""),
+        })
+        self.send_response(204)
+        # CORS abierto: el recolector de un atacante no se pone trabas.
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+    do_GET = do_POST = do_PUT = _record  # type: ignore[assignment]
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Allow-Methods", "*")
+        self.end_headers()
+
+
+def serve(portal_port: int = PORTAL_PORT,
+          collector_port: int = COLLECTOR_PORT) -> tuple[ThreadingHTTPServer, ThreadingHTTPServer]:
+    """Arranca ambos servidores en hilos de fondo y los devuelve."""
+    portal = ThreadingHTTPServer(
+        ("127.0.0.1", portal_port),
+        partial(PortalHandler, directory=str(APPS)))
+    collector = ThreadingHTTPServer(("127.0.0.1", collector_port), CollectorHandler)
+    for server in (portal, collector):
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+    return portal, collector
+
+
+def main() -> int:
+    portal, collector = serve()
+    print(f"portal      http://127.0.0.1:{portal.server_address[1]}/")
+    print(f"recolector  http://127.0.0.1:{collector.server_address[1]}/")
+    print("Ctrl-C para terminar.")
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        print()
     finally:
-        server.httpd.server_close()
+        portal.shutdown()
+        collector.shutdown()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

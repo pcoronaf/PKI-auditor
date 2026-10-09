@@ -101,6 +101,12 @@ TRANSFORMS = REVERSIBLE_TRANSFORMS | OBSCURING_TRANSFORMS
 #: Constructores que envuelven datos conservando la procedencia.
 TRANSFORM_CONSTRUCTORS = frozenset({"Blob", "File", "FormData", "URLSearchParams", "Uint8Array", "DataView"})
 
+#: Contenedores: envolver no es transformar. Los bytes de la clave siguen
+#: presentes verbatim dentro de un Blob o un FormData y saldrian reconocibles
+#: en el cuerpo de la peticion, asi que la ruta es transmision directa.
+CONTAINERS = TRANSFORM_CONSTRUCTORS
+
+
 #: Metodos que *acumulan* el argumento dentro del objeto receptor.
 #:
 #: A diferencia de una transformacion, aqui el dato no se consume: pasa a
@@ -178,12 +184,30 @@ NAME_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
                 re.I), Tag.KEY_FILE.value),
     (re.compile(r"certific|\.cer\b|\bcer[_-]?file\b|\bcrt\b|\bx509\b", re.I), Tag.CERTIFICATE.value),
     (re.compile(r"signature|\bfirma\b|signed[_-]?data|\bsello\b", re.I), Tag.SIGNATURE.value),
-    (re.compile(r"document|documento|payload|\bxml\b|\bpdf\b|cadena[_-]?original", re.I), Tag.DOCUMENT.value),
+    # "payload" queda fuera a proposito: nombra el cuerpo de cualquier peticion,
+    # no el documento a firmar. Incluirlo etiquetaba como DOCUMENT la variable
+    # de `upload(payload)` en un exfiltrador, y como DOCUMENT no es privado ni
+    # es "sin clasificar", el hallazgo desaparecia. Una procedencia inventada es
+    # peor que ninguna: suprime lo que si se podia afirmar.
+    (re.compile(r"document|documento|\bxml\b|\bpdf\b|cadena[_-]?original", re.I), Tag.DOCUMENT.value),
 )
 
 #: Nombres que parecen clave pero son material publico: evitan falsos positivos.
 PUBLIC_KEY_PATTERN = re.compile(r"public[_-]?key|pubkey|api[_-]?key|key[_-]?code|keyboard|keydown|keyup|keypress",
                                 re.I)
+
+#: ``document`` casi siempre es el DOM, no el documento a firmar. Sin esta
+#: excepcion, cualquier `document.getElementById(...)` etiqueta la expresion
+#: como DOCUMENT y contamina los hallazgos con una procedencia inventada.
+DOM_DOCUMENT_PATTERN = re.compile(
+    r"\bdocument\s*\.\s*(?:getElementById|getElementsBy\w+|querySelector(?:All)?|"
+    r"createElement|createTextNode|body|head|forms|cookie|documentElement|"
+    r"activeElement|addEventListener|write)\b", re.I)
+
+#: Senales de que "document" si se refiere al documento a firmar.
+REAL_DOCUMENT_PATTERN = re.compile(
+    r"documento|cadena[_-]?original|to[_-]?sign|sign(?:ed)?[_-]?document|"
+    r"document[_-]?(?:text|data|bytes|content|hash|payload)|\bxml\b|\bpdf\b", re.I)
 
 
 def infer_labels(text: str) -> set[str]:
@@ -201,6 +225,10 @@ def infer_labels(text: str) -> set[str]:
     for pattern, label in NAME_PATTERNS:
         if pattern.search(text):
             labels.add(label)
+    if (Tag.DOCUMENT.value in labels
+            and DOM_DOCUMENT_PATTERN.search(text)
+            and not REAL_DOCUMENT_PATTERN.search(text)):
+        labels.discard(Tag.DOCUMENT.value)
     return labels
 
 
