@@ -41,6 +41,11 @@ from ..audit_core.events import EGRESS_EVENTS, Event, EventType
 #: Sensores cuya negativa es concluyente: abortaron la peticion ellos mismos.
 DENYING_SENSORS = frozenset({"isolation"})
 
+#: Sensores que ven el cuerpo tal como salio y buscan en el los canarios. Si
+#: uno de ellos vio el cuerpo y el canario no estaba, la etiqueta del agente
+#: queda contradicha: el agente marca por el *tipo* de campo, ellos por los bytes.
+CONTENT_SENSORS = frozenset({"proxy", "cdp"})
+
 #: Ventana en la que dos observaciones pueden ser la misma peticion.
 DEFAULT_WINDOW_S = 15.0
 
@@ -116,6 +121,20 @@ class EgressGroup:
                 seen.add(mark)
                 out.append(match)
         return out
+
+    def content_lacks(self, label: str) -> bool:
+        """``True`` si un sensor de contenido vio el cuerpo y ``label`` no estaba.
+
+        Solo cuenta un cuerpo visto de verdad (tamano mayor que cero): CDP no
+        entrega los cuerpos multipart, y un cuerpo que nadie vio no contradice
+        nada. Lo decide quien vio los bytes, igual que la negativa del
+        aislamiento la decide quien aborto la peticion.
+        """
+        seen_body = any(e.sensor in CONTENT_SENSORS and int(e.data.get("body_size") or 0) > 0
+                        for e in self.observations)
+        if not seen_body:
+            return False
+        return not any(str(m.get("label", "")) == label for m in self.canary_matches)
 
     @property
     def primary(self) -> Event:

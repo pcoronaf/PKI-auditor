@@ -426,3 +426,58 @@ def test_sin_sesion_el_portal_no_muestra_el_formulario(lab, tmp_path):
     assert not pilot.signed
     assert not lab.LOGIN_PINGS
     assert status(report, "FS-LOCAL-001") != "CONFIRMED"
+
+
+def test_tc012_la_contrasena_de_la_cuenta_no_es_la_de_la_efirma(lab, tmp_path, credential):
+    """El primer piloto del panel: iniciar sesion en el portal *dentro* del
+    navegador auditado se reporto como "la contrasena de la e.firma salio".
+
+    La instrumentacion marca cualquier campo de tipo contrasena; los sensores
+    que ven el cuerpo deciden si lo que viajo era la contrasena registrada.
+    """
+    lab.LOGIN_PINGS.clear()
+    config = AuditConfig(target="http://127.0.0.1:8765/demo-login/", headless=True,
+                         output_dir=tmp_path, isolation=IsolationPolicy(mode=IsolationMode.FULL))
+    session = AuditSession(config)
+
+    def drive(stage, index, test):
+        page = session.controller.page
+        if stage.name == "prepare":
+            # El operador inicia sesion en el propio navegador auditado.
+            page.wait_for_selector("#account-password", timeout=15000)
+            page.fill("#username", lab.LAB_LOGIN_USER)
+            page.fill("#account-password", lab.LAB_LOGIN_PASSWORD)
+            page.click("#login")
+            page.wait_for_selector("#sign", timeout=15000)
+            page.wait_for_timeout(1000)
+        elif stage.name == "sign":
+            page.set_input_files("#cer-file", str(credential.cert_path))
+            page.set_input_files("#key-file", str(credential.key_path))
+            page.fill("#password", credential.password)
+            page.click("#sign")
+            page.wait_for_timeout(3000)
+        elif stage.name == "submit":
+            if page.query_selector("#submit:not([disabled])"):
+                page.click("#submit")
+            page.wait_for_timeout(1500)
+        return StageAction.CONTINUE
+
+    try:
+        session.prepare_credentials(credentials_dir=tmp_path / "cred")
+        session.credential = credential
+        credential.register(session.vault)
+        session.start_browser()
+        session.navigate(config.target)
+        session.controller.staged_offline_test().run(drive)
+        session.collect_and_analyze()
+        session.evaluate()
+    finally:
+        package = session.finish()
+    report = json.loads((package / "report.json").read_text(encoding="utf-8"))
+
+    assert lab.LOGIN_PINGS, "el inicio de sesion no llego a hacerse"
+    hallazgo = finding(report, "FS-PWD-001")
+    assert hallazgo["status"] == "NOT_OBSERVED", hallazgo["summary"]
+    assert "Otro campo de contrasena" in hallazgo["detail"]
+    # Y la firma, que es lo que se audita, sigue siendo local.
+    assert status(report, "FS-LOCAL-001") == "CONFIRMED"

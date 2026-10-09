@@ -31,7 +31,7 @@ h3 { margin: 0 0 6px; font-size: 14px; color: var(--muted);
      text-transform: uppercase; letter-spacing: .6px; }
 .sub { margin: 4px 0; color: var(--muted); font-size: 13px; }
 .version { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
-main { padding: 16px 22px 48px; max-width: 900px; }
+main { padding: 16px 22px 48px; max-width: 1400px; margin: 0 auto; }
 .card {
   background: var(--card); border: 1px solid var(--line); border-radius: 8px;
   padding: 16px; margin-bottom: 14px;
@@ -63,6 +63,7 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
 /* Botones */
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
 .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+.row.wrap { flex-wrap: wrap; }
 button {
   padding: 7px 13px; border-radius: 5px; border: 1px solid var(--line);
   background: var(--card); color: var(--fg); font: inherit; cursor: pointer;
@@ -89,9 +90,10 @@ ol.stages li .net { font-size: 11px; opacity: .8; }
 .problems ul { margin: 4px 0 0; padding-left: 18px; }
 
 /* Feed */
-.feed { max-height: 230px; overflow-y: auto; font-family: ui-monospace, Menlo, monospace;
-        font-size: 12px; display: grid; gap: 2px; }
-.feed .ev { display: grid; grid-template-columns: 170px 1fr auto; gap: 8px; }
+.feed { max-height: 320px; overflow-y: auto; font-family: ui-monospace, Menlo, monospace;
+        font-size: 12px; display: grid; gap: 2px; align-content: start; }
+.feed .ev { display: grid; grid-template-columns: minmax(110px, 170px) minmax(0, 1fr) auto;
+            gap: 8px; }
 .feed .ev .t { color: var(--accent); }
 .feed .ev .d { color: var(--muted); overflow: hidden; text-overflow: ellipsis;
                white-space: nowrap; }
@@ -104,7 +106,7 @@ ol.stages li .net { font-size: 11px; opacity: .8; }
 .feed .ev.private .d, .feed .ev.private .t { color: var(--bad, #dc2626); font-weight: 600; }
 .kv dd .copy { margin-left: 8px; padding: 2px 8px; font-size: 12px; }
 /* Aviso del nucleo sobre como se ejecuta (el panel abre un puerto local). */
-.notice { margin: 0 auto 12px; max-width: 960px; padding: 10px 14px;
+.notice { margin: 12px auto 0; max-width: calc(1400px - 44px); padding: 10px 14px;
   border: 1px solid var(--warn, #d97706); border-radius: 6px;
   background: rgba(217, 119, 6, 0.12); color: var(--fg, inherit); }
 .feed .empty { color: var(--muted); font-family: inherit; }
@@ -139,3 +141,27 @@ table td:last-child { text-align: right; font-weight: 600; }
   box-shadow: 0 6px 24px rgba(0,0,0,.35);
 }
 #toast.bad { border-color: var(--bad); color: var(--bad); }
+
+/* Disposicion. En pantallas anchas, la sesion en dos columnas: etapas y
+   controles a la izquierda, lo observado a la derecha con la altura de la
+   ventana. En el primer piloto del panel todo cabia en 900 px a la izquierda y
+   los eventos en una caja de 230 px. */
+.session-grid:not([hidden]) { display: block; }
+@media (min-width: 1100px) {
+  .session-grid:not([hidden]) {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 14px; align-items: start;
+  }
+  .col-side { position: sticky; top: 12px; }
+  .feed-card .feed { max-height: calc(100vh - 120px); }
+}
+@media (max-width: 700px) {
+  header { padding: 14px 14px 8px; }
+  main { padding: 12px 12px 40px; }
+  .notice { margin: 12px; }
+  .feed .ev { grid-template-columns: minmax(0, 1fr); gap: 0;
+              padding: 3px 0; border-bottom: 1px solid var(--line); }
+  .feed .ev .d { white-space: normal; }
+  .row { flex-wrap: wrap; }
+  dl.kv { grid-template-columns: minmax(0, 1fr); }
+}

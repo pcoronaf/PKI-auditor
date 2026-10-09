@@ -58,7 +58,8 @@
   </section>
 
   <!-- Sesion en marcha -->
-  <section id="view-session" hidden>
+  <section id="view-session" class="session-grid" hidden>
+   <div class="col-main">
     <div class="card" id="stage-card">
       <div class="stage-head">
         <h2 id="stage-title">—</h2>
@@ -82,24 +83,33 @@
     </div>
 
     <div class="card">
-      <h3>Pagina</h3>
+      <h3>Navegador auditado</h3>
+      <p class="sub">Para abrir otra direccion en el navegador que se esta auditando:
+      si no indico el sitio al empezar, o si el portal le pide ir a otra pagina.
+      Lo normal es navegar directamente en esa ventana.</p>
       <div class="row">
-        <input type="text" id="url-input" placeholder="portal.ejemplo.mx"
+        <input type="text" id="url-input" placeholder="https://portal.ejemplo.mx/firma"
                autocomplete="off" spellcheck="false">
         <button data-action="navigate">Abrir</button>
       </div>
-      <div class="row">
+      <p class="sub">Las etapas ya cortan y restablecen la red. Estos botones lo hacen
+      a mano, fuera de las etapas: por ejemplo, para restablecerla si el portal se
+      quedo esperando a un servidor.</p>
+      <div class="row wrap">
         <button data-action="offline">Cortar la red</button>
         <button data-action="online">Restablecer la red</button>
         <button data-action="live">Opciones en marcha</button>
       </div>
       <p class="sub" id="session-status"></p>
     </div>
+   </div>
 
-    <div class="card">
+   <div class="col-side">
+    <div class="card feed-card">
       <h3>Observado en vivo</h3>
       <div class="feed" id="feed"></div>
     </div>
+   </div>
   </section>
 
   <!-- Opciones modificables en marcha -->

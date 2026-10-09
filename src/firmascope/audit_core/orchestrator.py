@@ -76,6 +76,16 @@ class AuditSession:
             self.store.subscribe(on_event)
 
     # ------------------------------------------------------------------
+    def live_stats(self) -> dict[str, Any]:
+        """Contadores de la sesion, con las peticiones contadas en el expediente.
+
+        ``stats.requests`` no lo incrementaba nadie: la interfaz mostraba
+        "0 peticiones" con el portal enviando decenas, y el evento de cierre
+        lo dejaba asi en la cadena de evidencias. Se cuenta donde se guardan.
+        """
+        self.stats.requests = self.store.request_count()
+        return self.stats.to_dict()
+
     def emit(self, event: Event) -> Event:
         stored = self.store.add_event(event)
         self.stats.events += 1
@@ -214,6 +224,8 @@ class AuditSession:
             checkpoints=self.store.checkpoints(),
             static=self.static_report,
             canary_labels=self.vault.labels if self.vault.alive else set(),
+            key_password_length=len(self.credential.password)
+            if self.credential is not None and self.credential.password else None,
         )
         engine = RuleEngine(extra_dirs=self.config.rules_dirs)
         self.findings = engine.evaluate(context)
@@ -265,7 +277,7 @@ class AuditSession:
         self.emit(Event(EventType.SESSION_END, self.session_id, sensor="orchestrator",
                         data={"aborted": aborted, "reason": reason,
                               "duration_s": round(time.time() - self._started_at, 3),
-                              **self.stats.to_dict()}))
+                              **self.live_stats()}))
 
         isolation = self.isolation_summary()
         proxy = self.proxy_summary()

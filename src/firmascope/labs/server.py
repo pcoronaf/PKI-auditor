@@ -134,7 +134,14 @@ class PortalHandler(SimpleHTTPRequestHandler):
             import secrets
             from urllib.parse import parse_qs
 
-            form = parse_qs(body.decode("utf-8", "replace"))
+            if "json" in self.headers.get("Content-Type", ""):
+                try:
+                    data = json.loads(body or b"{}")
+                except ValueError:
+                    data = {}
+                form = {k: [str(v)] for k, v in data.items()} if isinstance(data, dict) else {}
+            else:
+                form = parse_qs(body.decode("utf-8", "replace"))
             if ((form.get("username") or [""])[0] != LAB_LOGIN_USER
                     or (form.get("password") or [""])[0] != LAB_LOGIN_PASSWORD):
                 self._json(401, {"error": "usuario o contrasena incorrectos"})

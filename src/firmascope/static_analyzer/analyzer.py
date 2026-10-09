@@ -12,16 +12,29 @@ hashes, que el motor de reglas convierte en hallazgos ``POTENTIAL``.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from ..audit_core.conclusions import Confidence
 from . import catalog, parser
-from .taint import ScriptAnalysis, SourceRef, StaticPath
+from .taint import AnalysisTimeout, ScriptAnalysis, SourceRef, StaticPath
 
 #: Tamano maximo de script analizado. Los bundles enormes se truncan para que
 #: una auditoria no se bloquee en un fichero de varios megabytes.
 MAX_SCRIPT_BYTES = 3 * 1024 * 1024
+
+#: Segundos que puede durar el analisis estatico de una sesion, y de un solo
+#: script. En el primer piloto sobre un portal real, el analisis de todos sus
+#: bundles tardaba tanto que la auditoria parecia congelada en la ultima
+#: etapa. Lo que no cabe en el presupuesto queda declarado como no analizado,
+#: nunca como analizado sin rutas.
+STATIC_BUDGET_S = 150.0
+SCRIPT_BUDGET_S = 60.0
+
+#: Senales que hacen relevante un script para la custodia de la clave: se
+#: analizan primero, para que el presupuesto se gaste donde importa.
+_KEY_SIGNALS = ("file_access", "password_access", "webcrypto")
 
 
 @dataclass
@@ -73,6 +86,14 @@ class StaticReport:
     failed: int = 0
     skipped: int = 0
     ast_available: bool = True
+    #: Scripts que no se analizaron porque se agoto el presupuesto de tiempo.
+    timed_out: list[dict[str, Any]] = field(default_factory=list)
+
+    def timed_out_relevant(self) -> list[dict[str, Any]]:
+        """Los no analizados que manejan archivos, contrasenas o cripto."""
+        return [s for s in self.timed_out
+                if any(getattr(self.signals.get(s.get("sha256", "")), name, False)
+                       for name in _KEY_SIGNALS)]
 
     # -- consultas usadas por el motor de reglas ------------------------
     def private_paths(self) -> list[StaticPath]:
@@ -110,6 +131,9 @@ class StaticReport:
             "scripts_parsed": self.parsed,
             "scripts_failed": self.failed,
             "scripts_skipped": self.skipped,
+            "scripts_timed_out": [
+                {"url": s.get("url", ""), "sha256": s.get("sha256", "")}
+                for s in self.timed_out],
             "paths": [p.to_dict() for p in self.paths],
             "signals": {sha: info.to_dict() for sha, info in self.signals.items()},
         }
@@ -124,20 +148,37 @@ def detect_signals(source: str) -> ScriptSignals:
     return signals
 
 
-def analyze_source(source: bytes, file_label: str, url: str = "") -> list[StaticPath]:
-    """Analiza un unico script. Util para pruebas unitarias."""
+def analyze_source(source: bytes, file_label: str, url: str = "",
+                   deadline: float | None = None) -> list[StaticPath]:
+    """Analiza un unico script. Util para pruebas unitarias.
+
+    Si se agota ``deadline`` lanza :class:`AnalysisTimeout`: quedarse sin
+    tiempo no es un fallo de parseo, y degradar al barrido por patrones lo
+    haria pasar por un analisis hecho.
+    """
     if parser.available():
         try:
-            return ScriptAnalysis(source, file_label, url).run()
+            return ScriptAnalysis(source, file_label, url, deadline=deadline).run()
+        except AnalysisTimeout:
+            raise
         except Exception:
             pass
     return _fallback_scan(source, file_label, url)
 
 
 def analyze_scripts(scripts: list[dict[str, Any]],
-                    read_body: Callable[[dict[str, Any]], bytes | None]) -> StaticReport:
-    """Analiza todo el inventario de scripts de una sesion."""
+                    read_body: Callable[[dict[str, Any]], bytes | None],
+                    budget: float | None = STATIC_BUDGET_S,
+                    script_budget: float = SCRIPT_BUDGET_S,
+                    clock: Callable[[], float] = time.monotonic) -> StaticReport:
+    """Analiza el inventario de scripts de una sesion dentro de un presupuesto.
+
+    Primero los scripts que manejan archivos, contrasenas o cripto, despues
+    los propios del sitio y al final los de terceros; dentro de cada grupo,
+    del mas pequeno al mas grande. Lo que no cabe queda en ``timed_out``.
+    """
     report = StaticReport(ast_available=parser.available())
+    pending: list[tuple[tuple, dict[str, Any], bytes, str]] = []
     for script in scripts:
         report.scripts.append(script)
         body = None
@@ -151,11 +192,31 @@ def analyze_scripts(scripts: list[dict[str, Any]],
         if len(body) > MAX_SCRIPT_BYTES:
             body = body[:MAX_SCRIPT_BYTES]
         label = _label_for(script)
-        text = body.decode("utf-8", "replace")
-        report.signals[script.get("sha256", label)] = detect_signals(text)
+        signals = detect_signals(body.decode("utf-8", "replace"))
+        report.signals[script.get("sha256", label)] = signals
+        relevant = any(getattr(signals, name) for name in _KEY_SIGNALS)
+        priority = (not relevant, bool(script.get("third_party")), len(body))
+        pending.append((priority, script, body, label))
+
+    pending.sort(key=lambda item: item[0])
+    session_deadline = None if budget is None else clock() + budget
+    for _, script, body, label in pending:
+        now = clock()
+        if session_deadline is not None and now >= session_deadline:
+            report.timed_out.append(script)
+            continue
+        allowed = script_budget
+        if session_deadline is not None:
+            allowed = min(allowed, session_deadline - now)
+        # El analisis mide con time.monotonic; ``clock`` solo reparte el
+        # presupuesto de la sesion (y permite probar el reparto).
+        deadline = time.monotonic() + allowed
         try:
-            paths = analyze_source(body, label, script.get("url", ""))
+            paths = analyze_source(body, label, script.get("url", ""), deadline=deadline)
             report.parsed += 1
+        except AnalysisTimeout:
+            report.timed_out.append(script)
+            continue
         except Exception:
             report.failed += 1
             continue

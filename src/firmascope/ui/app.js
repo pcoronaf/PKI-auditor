@@ -611,6 +611,12 @@ async function stageAction(action) {
 }
 
 async function finish(aborted) {
+  // El analisis del codigo del sitio puede tardar minutos en un portal real.
+  // Sin este aviso la interfaz parecia congelada en la ultima etapa.
+  const note = $('stage-note');
+  note.textContent = 'Analizando el codigo del sitio y escribiendo el expediente. '
+    + 'Puede tardar unos minutos; no cierre esta ventana.';
+  note.hidden = false;
   await withBusy(async () => {
     const done = await call('finish', {
       aborted: Boolean(aborted),
@@ -630,7 +636,10 @@ const LIVE_TYPES = {
   FILE_SELECTED: 1, FILE_READ: 1, PASSWORD_READ: 1, CRYPTO_IMPORT: 1,
   CRYPTO_DECRYPT: 1, CRYPTO_SIGN: 1, CRYPTO_EXPORT: 1, CRYPTO_WRAP: 1,
   STORAGE_WRITE: 1, NETWORK_OFF: 1, NETWORK_ON: 1, BEACON_SEND: 1,
-  WEBSOCKET_SEND: 1, FORM_SUBMIT: 1, NETWORK_REQUEST: 1
+  WEBSOCKET_SEND: 1, FORM_SUBMIT: 1, NETWORK_REQUEST: 1,
+  // Errores de JavaScript de la pagina: si el portal se queda "cargando", es lo
+  // primero que hay que ver, y sin esto solo estaban en el expediente.
+  AGENT_ERROR: 1
 };
 
 function startPolling() {
@@ -686,12 +695,16 @@ function addEvent(event) {
   const detail = document.createElement('span');
   detail.className = 'd';
   const data = event.data || {};
-  const where = data.host || data.store || data.reason || data.algorithm || '';
+  const where = data.host || data.store || data.reason || data.algorithm
+    || (data.message ? `${data.kind || 'error'}: ${data.message}` : '');
   const size = data.body_size || data.size || '';
   const mark = privateEgress
     ? (blocked ? '[INTENTO BLOQUEADO DE SACAR MATERIAL PRIVADO]' : '[SALIDA DE MATERIAL PRIVADO]')
     : (blocked ? '[BLOQUEADO]' : '');
   detail.textContent = [where, size, mark].filter(Boolean).join(' ');
+  // La linea se recorta para que la lista siga legible; el texto completo
+  // (un mensaje de error largo, una URL) queda al pasar el cursor.
+  detail.title = detail.textContent;
   if (privateEgress) { row.setAttribute('role', 'alert'); }
 
   const tags = document.createElement('span');
