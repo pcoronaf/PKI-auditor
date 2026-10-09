@@ -169,7 +169,10 @@ async function boot() {
     const schema = await call('schema');
     state.schema = schema.options;
     state.answers = Object.assign({}, schema.defaults);
-    renderSetup();
+    // Que campos condicionales se ven lo decide el nucleo: sin preguntarle al
+    // arrancar, el aislamiento (que depende del nivel) no aparecia hasta que
+    // el operador cambiaba algo.
+    await refreshValidation();
     show('view-setup');
   } catch (err) {
     $('error-detail').textContent = String(err && err.message ? err.message : err);
@@ -576,10 +579,16 @@ function renderStage() {
   });
 
   document.querySelector('[data-action="back"]').disabled = !stage.allow_back;
-  // La credencial solo hace falta en la etapa de firma: antes distrae, y
-  // despues ya no aporta.
-  $('credential-card').hidden = !(stage.name === 'sign'
-    && state.credential && state.credential.synthetic);
+  // En la ultima etapa el boton ya no lleva a otra etapa: cierra la sesion,
+  // analiza y escribe el expediente. Llamarlo "Siguiente" no decia eso.
+  document.querySelector('[data-action="next"]').textContent =
+    stage.index === stage.total - 1 ? 'Finalizar y generar reporte' : 'Siguiente';
+  // La credencial queda a la vista toda la sesion: en el piloto, el operador
+  // volvio atras a repetir la firma y ya no tenia la ruta ni la contrasena.
+  // En la etapa de firma se resalta, que es cuando se usa.
+  const card = $('credential-card');
+  card.hidden = !(state.credential && state.credential.synthetic);
+  card.classList.toggle('focus', stage.name === 'sign');
 }
 
 async function stageAction(action) {

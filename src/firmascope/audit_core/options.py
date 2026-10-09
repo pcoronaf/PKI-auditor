@@ -123,12 +123,22 @@ def _is_full_level(answers: dict[str, Any]) -> bool:
     return str(answers.get("level", "")) == "4"
 
 
+def _has_offline_test(answers: dict[str, Any]) -> bool:
+    """La prueba de firma sin conexion existe en los niveles 3 y 4.
+
+    En el piloto, con "Solo red" se seguia preguntando el aislamiento y el
+    flujo ofrecia las etapas sin conexion: el operador creia probar algo que
+    ese nivel no prueba.
+    """
+    return str(answers.get("level", "4") or "4") in ("3", "4")
+
+
 def _is_allowlist(answers: dict[str, Any]) -> bool:
-    return str(answers.get("isolation", "")) == "allowlist"
+    return _has_offline_test(answers) and str(answers.get("isolation", "")) == "allowlist"
 
 
 def _has_isolation(answers: dict[str, Any]) -> bool:
-    return str(answers.get("isolation", "")) != "none"
+    return _has_offline_test(answers) and str(answers.get("isolation", "")) != "none"
 
 
 # ----------------------------------------------------------------------
@@ -230,6 +240,7 @@ AUDIT_OPTIONS: tuple[Option, ...] = (
         kind=OptionKind.CHOICE,
         default="full",
         live=True,
+        depends_on=_has_offline_test,
         help="Como se corta la salida de red en la etapa de firma.",
         choices=(
             Choice("full", "Total",
@@ -451,7 +462,10 @@ def build_config(answers: dict[str, Any]) -> AuditConfig:
         raise ValueError("; ".join(problems))
 
     isolation = IsolationPolicy(
-        mode=IsolationMode.parse(str(answers.get("isolation") or "full")),
+        # Sin prueba sin conexion (niveles 1 y 2) no se corta nada: un valor
+        # que quedo de antes en el formulario no debe activar etapas sin red.
+        mode=IsolationMode.parse(str(answers.get("isolation") or "full"))
+        if _has_offline_test(answers) else IsolationMode.NONE,
         allow_hosts=_as_list(answers.get("allow_hosts")),
         emulate_offline_flag=bool(answers.get("emulate_offline_flag", True)),
     )

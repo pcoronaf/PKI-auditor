@@ -175,7 +175,13 @@ Ctrl-C en la terminal, que cierra también el expediente.
 ### Credencial de prueba o credencial real
 
 Por defecto FirmaScope genera una credencial sintética de laboratorio, cuyo
-sujeto declara que **no** es un certificado del SAT. Para auditar un portal con
+sujeto declara que **no** es un certificado del SAT. Su `.key` tiene, en cambio,
+el **mismo cifrado que una e.firma real** (PBES2, PBKDF2-HMAC-SHA1 con 2048
+iteraciones y 3DES): las bibliotecas FIEL de los portales, como jsrsasign hasta
+la versión 8, no leen otro formato, y con una llave en AES el portal falla antes
+de llegar a firmar. Así el portal procesa la llave como procesaría la del
+usuario, y solo puede rechazarla por el certificado. `firmascope credentials new
+--format aes` genera el formato anterior. Para auditar un portal con
 la e.firma real del operador existe el modo `real`, que exige confirmación
 escrita y aplica un endurecimiento no negociable (sin cuerpos HTTP persistidos,
 con redacción de nombres de archivo e identificadores fiscales). El
@@ -192,6 +198,13 @@ procedimiento y sus riesgos están en
 | 2 | Front-End Code Analyzer | ¿qué *podría* hacer el código aunque no haya ocurrido? |
 | 3 | Local Signing Test | ¿la firma se completa con la red aislada? |
 | 4 | Full Correlated Audit | instrumentación + CDP + estático + proxy + correlación |
+
+El nivel 1 **no inyecta nada en la página**: es también la prueba de control.
+Si un portal funciona en nivel 1 y deja de funcionar en nivel 2 o superior, la
+instrumentación lo está alterando, y eso es un fallo de FirmaScope. Los niveles
+1 y 2 no tienen prueba sin conexión, así que el flujo tiene cuatro etapas
+(cargar, preparar, firmar con red, enviar) y no se pregunta el aislamiento; lo
+mismo ocurre en los niveles 3 y 4 con «Sin aislamiento».
 
 ## Estados de conclusión
 
@@ -424,6 +437,9 @@ los cuatro están cubiertos por pruebas de regresión:
 - El proxy ve lo que pasa por HTTP(S). Un sitio con *certificate pinning*
   rechazará la CA efímera, y ese destino queda sin observar: el reporte lo
   registra como fallo de TLS en lugar de presentarlo como ausencia de tráfico.
+- Un portal que no puede leer una llave debería decirlo. Si se queda
+  «cargando», revise en «Observado en vivo» si la página lanzó un error: es un
+  defecto de manejo de errores del portal, y conviene reportarlo como tal.
 - La instrumentación observa la criptografía de **WebCrypto**. Un portal que
   descifra y firma con una biblioteca JavaScript (jsrsasign, forge, o un
   `FielUtil` propio) no expone esas operaciones: FirmaScope ve la lectura del

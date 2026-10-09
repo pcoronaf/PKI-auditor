@@ -94,3 +94,33 @@ def test_un_campo_que_llega_a_la_longitud_de_la_efirma_cuenta(config):
     _, context = pwd(config, eventos)
     assert not context.other_password_fields()
     assert context.observed_password()
+
+
+def test_el_reporte_y_la_regla_cuentan_lo_mismo(tmp_path, config):
+    """En el piloto, FS-NET-001 decia "ningun tercero" y la tabla del mismo
+    reporte listaba dos: el reporte construia su propio contexto sin conocer la
+    credencial, y tomaba la contrasena de la cuenta como acceso a la clave."""
+    from types import SimpleNamespace
+
+    from firmascope.evidence_store.store import EvidenceStore, RequestRecord
+    from firmascope.report_engine.exporter import build_report
+
+    store = EvidenceStore(tmp_path, "s")
+    for event in login_password(0) + key_access(150):
+        store.add_event(event)
+    # Analitica de tercero entre el login y la firma.
+    store.add_request(RequestRecord(
+        timestamp=eventos_t0() + 60, method="GET", url="https://analitica.example/b",
+        host="analitica.example", registrable="analitica.example", third_party=True))
+    credential = SimpleNamespace(password="x" * KEY_PASSWORD_LENGTH, describe=lambda *_: {})
+
+    context = AuditContext.from_store(store, config, credential=credential)
+    assert context.third_parties_after_key_access() == {}
+    report = build_report(store, config, "s", {}, credential=credential)
+    assert report["third_parties_after_key_access"] == {}
+    store.close()
+
+
+def eventos_t0() -> float:
+    from conftest import T0
+    return T0

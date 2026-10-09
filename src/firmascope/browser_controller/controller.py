@@ -34,7 +34,7 @@ from ..instrumentation_agent.loader import (
 )
 from ..network_analyzer import domains
 from ..network_analyzer.cdp_observer import NetworkObserver
-from .isolation import DEFAULT_STAGES, NetworkIsolation, Stage, StagedOfflineTest
+from .isolation import NetworkIsolation, Stage, StagedOfflineTest, stages_for
 
 
 class BrowserController:
@@ -114,13 +114,19 @@ class BrowserController:
         self.context = self.browser.new_context(**context_kwargs)
         self.context.set_default_timeout(30_000)
 
-        self.context.expose_binding(DEFAULT_CHANNEL, self._on_agent_record)
-        self.context.add_init_script(self._init_script())
-        # Los workers se instrumentan interceptando la descarga de su script
-        # (ver `workerTarget` en agent.js): asi conservan su URL real. Cargarlos
-        # desde un blob: rompia toda ruta relativa dentro del worker, y la
-        # auditoria observaba un sitio roto en lugar del real. Portado del PR #2.
-        self.context.route(re.compile(rf"[?&]{WORKER_MARK}=1"), self._on_worker_script)
+        if self.config.instrumentation:
+            self.context.expose_binding(DEFAULT_CHANNEL, self._on_agent_record)
+            self.context.add_init_script(self._init_script())
+            # Los workers se instrumentan interceptando la descarga de su script
+            # (ver `workerTarget` en agent.js): asi conservan su URL real.
+            # Cargarlos desde un blob: rompia toda ruta relativa dentro del
+            # worker, y la auditoria observaba un sitio roto en lugar del real.
+            # Portado del PR #2.
+            self.context.route(re.compile(rf"[?&]{WORKER_MARK}=1"), self._on_worker_script)
+        # En nivel 1 la pagina corre sin el agente: es la prueba de control de
+        # "la instrumentacion no altera el sitio". En el segundo piloto, "Solo
+        # red" seguia inyectandolo, y no habia forma de descartar que el agente
+        # fuera la causa de que el portal se colgara.
 
         self.observer = NetworkObserver(self.session_id, self.store, self.config, self.emit, self.vault)
         self.isolation = NetworkIsolation(
@@ -399,7 +405,7 @@ class BrowserController:
             raise RuntimeError("el navegador no esta iniciado")
         return StagedOfflineTest(
             self, self.isolation, self.emit, self.session_id,
-            stages=stages or list(DEFAULT_STAGES))
+            stages=stages or stages_for(self.config))
 
     def checkpoint(self, name: str, detail: str = "") -> dict:
         record = self.store.add_checkpoint(

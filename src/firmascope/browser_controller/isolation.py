@@ -415,6 +415,29 @@ DEFAULT_STAGES: tuple[Stage, ...] = (
 )
 
 
+#: Flujo sin prueba de firma sin conexion: nivel 1 o 2, o aislamiento
+#: desactivado. Ofrecer "Aislar la red" y "Firmar con la red aislada" sin cortar
+#: nada llenaba el expediente de etapas que no lograron su estado de red, y le
+#: hacia creer al operador que habia probado algo que no se probo.
+ONLINE_STAGES: tuple[Stage, ...] = (
+    DEFAULT_STAGES[0],
+    DEFAULT_STAGES[1],
+    Stage("sign", "ONLINE", "Firmar",
+          "Cargue el .cer, el .key y la contrasena, y pulse firmar. La red sigue "
+          "conectada: esta sesion observa que sale, pero no prueba donde se firma."),
+    DEFAULT_STAGES[5],
+)
+
+
+def stages_for(config: Any) -> list[Stage]:
+    """Las etapas que corresponden a la configuracion de la sesion."""
+    from ..audit_core.config import IsolationMode
+
+    if config.offline_test and config.isolation.mode is not IsolationMode.NONE:
+        return list(DEFAULT_STAGES)
+    return list(ONLINE_STAGES)
+
+
 @dataclass
 class StageRecord:
     """Lo ocurrido en una visita a una etapa."""

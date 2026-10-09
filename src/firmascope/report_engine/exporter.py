@@ -67,14 +67,23 @@ def _sensors(events: list[Any], proxy: dict[str, Any] | None) -> dict[str, Any]:
         "proxy": bool(proxy.get("running")),
         "bodies_recovered_by_proxy": recovered,
     }
+    notes: list[str] = []
+    if not info["agent"]:
+        notes.append(
+            "Sin instrumentacion en la pagina (nivel 1): no se observo la lectura del "
+            ".key ni de la contrasena, asi que las reglas de procedencia quedan sin "
+            "concluir. Es tambien la prueba de control: si el sitio funciona aqui y no "
+            "con instrumentacion, la instrumentacion lo altera.")
     if not info["proxy"]:
-        info["limitation"] = (
+        notes.append(
             "Sin interceptacion TLS, los cuerpos que el navegador no entrega al "
             "depurador (subidas multipart, flujos) no se examinaron por contenido. "
             "La procedencia que aporta la instrumentacion sigue siendo valida; lo "
             "que no hay es prueba de contenido para esas peticiones.")
     elif proxy.get("error"):
-        info["limitation"] = str(proxy["error"])
+        notes.append(str(proxy["error"]))
+    if notes:
+        info["limitation"] = " ".join(notes)
     return info
 
 
@@ -88,15 +97,9 @@ def build_report(store: EvidenceStore, config: AuditConfig, session_id: str,
     from ..browser_controller.isolation import processing_locality
     from ..rule_engine.context import AuditContext
 
-    events = store.events()
-    requests = store.requests()
-    scripts = store.scripts()
     findings = store.findings()
-
-    context = AuditContext(
-        config=config, events=events, requests=requests, scripts=scripts,
-        checkpoints=store.checkpoints(), static=static_report,
-    )
+    context = AuditContext.from_store(store, config, static=static_report, credential=credential)
+    events, requests, scripts = context.events, context.requests, context.scripts
     offline_windows = context.offline_windows()
     third_parties = context.third_parties_after_key_access()
     names = context.third_party_names()
@@ -125,7 +128,10 @@ def build_report(store: EvidenceStore, config: AuditConfig, session_id: str,
             "findings": len(findings),
             "offline_windows": len(offline_windows),
         },
-        "processing_locality": processing_locality(events, offline_windows),
+        # La contrasena de la cuenta del portal no es "acceso a la contrasena"
+        # de la e.firma: mismo criterio que las reglas.
+        "processing_locality": processing_locality(
+            [e for e in events if not context.is_other_password_read(e)], offline_windows),
         "isolation": isolation or {},
         # Que sensores estuvieron activos acota lo que el expediente puede
         # afirmar. Sin proxy, un cuerpo que el navegador no entrego no se pudo

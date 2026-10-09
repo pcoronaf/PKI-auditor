@@ -112,7 +112,7 @@ class AuditSession:
             return None
 
         if mode is CredentialMode.SYNTHETIC:
-            credential = credentials.generate()
+            credential = credentials.generate(key_format=self.config.synthetic_key_format)
             target_dir = Path(credentials_dir or (Path.cwd() / "fixtures" / "synthetic-efirma"))
             credential.write(target_dir)
         else:
@@ -216,17 +216,8 @@ class AuditSession:
         from ..rule_engine.context import AuditContext
         from ..rule_engine.engine import RuleEngine
 
-        context = AuditContext(
-            config=self.config,
-            events=self.store.events(),
-            requests=self.store.requests(),
-            scripts=self.store.scripts(),
-            checkpoints=self.store.checkpoints(),
-            static=self.static_report,
-            canary_labels=self.vault.labels if self.vault.alive else set(),
-            key_password_length=len(self.credential.password)
-            if self.credential is not None and self.credential.password else None,
-        )
+        context = AuditContext.from_store(self.store, self.config, static=self.static_report,
+                                          credential=self.credential)
         engine = RuleEngine(extra_dirs=self.config.rules_dirs)
         self.findings = engine.evaluate(context)
         for finding in self.findings:
@@ -237,7 +228,10 @@ class AuditSession:
     def versions(self) -> dict[str, Any]:
         info: dict[str, Any] = {
             "firmascope": __version__,
-            "agent_sha256": agent_sha256(),
+            # Sin instrumentacion (nivel 1) no hubo agente en la pagina, y el
+            # manifiesto no debe sugerir lo contrario.
+            "agent_sha256": agent_sha256() if self.config.instrumentation
+            else "(nivel 1: sin instrumentacion)",
             **environment_info(),
         }
         if self.controller is not None:

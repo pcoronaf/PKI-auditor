@@ -68,6 +68,30 @@ class AuditContext:
         wanted = {t.value if isinstance(t, Tag) else t for t in tags}
         return [e for e in self.events if wanted & set(e.tags)]
 
+    @classmethod
+    def from_store(cls, store: Any, config: AuditConfig, *, static: Any = None,
+                   credential: Any = None) -> "AuditContext":
+        """El contexto de una sesion, igual para las reglas y para el reporte.
+
+        Antes cada uno construia el suyo, y el del reporte no conocia la
+        credencial: en el piloto del panel, FS-NET-001 decia que ningun tercero
+        habia recibido trafico tras el acceso a la clave y la tabla del mismo
+        reporte listaba dos, porque contaba la contrasena de la cuenta del
+        portal como acceso a la clave. Una pieza, una implementacion.
+        """
+        vault = getattr(store, "vault", None)
+        password = getattr(credential, "password", None)
+        return cls(
+            config=config,
+            events=store.events(),
+            requests=store.requests(),
+            scripts=store.scripts(),
+            checkpoints=store.checkpoints(),
+            static=static,
+            canary_labels=vault.labels if vault is not None and vault.alive else set(),
+            key_password_length=len(password) if password else None,
+        )
+
     def __post_init__(self) -> None:
         if self.correlation is None:
             from ..correlation_engine import correlate
