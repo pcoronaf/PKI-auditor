@@ -69,6 +69,50 @@ KNOWN_THIRD_PARTIES = {
 }
 
 #: Categorias de tercero relevantes para el modelo de amenazas.
+#: Destinos del propio navegador, no del sitio auditado. Chromium habla con
+#: ellos para actualizaciones, deteccion de phishing, autocompletado y
+#: resolucion de conectividad. Atribuirlos al portal seria una acusacion falsa:
+#: aparecerian en FS-NET-001 como "terceros contactados tras el acceso a la
+#: clave" cuando el portal no ha pedido nada.
+#:
+#: Se excluyen de la *atribucion*, no de la observacion: siguen registrados en
+#: el expediente, porque ocultar trafico seria peor que clasificarlo mal.
+BROWSER_INFRASTRUCTURE = frozenset(
+    {
+        "googleapis.com", "gstatic.com", "chromium.org", "chrome.com",
+        "gvt1.com", "gvt2.com",
+    }
+)
+
+#: Subdominios de infraestructura del navegador, cuando el dominio registrable
+#: tambien puede ser legitimamente del sitio (p. ej. un portal en googleapis).
+BROWSER_INFRASTRUCTURE_HOSTS = frozenset(
+    {
+        "accounts.google.com", "clients1.google.com", "clients2.google.com",
+        "clients3.google.com", "clients4.google.com", "clientservices.googleapis.com",
+        "update.googleapis.com", "safebrowsing.googleapis.com",
+        "content-autofill.googleapis.com", "optimizationguide-pa.googleapis.com",
+        "android.clients.google.com", "www.googleapis.com",
+        "connectivitycheck.gstatic.com", "www.gstatic.com",
+    }
+)
+
+
+def is_browser_infrastructure(url_or_host: str) -> bool:
+    """True si el destino es un servicio del navegador y no del sitio.
+
+    Un portal que de verdad use estos dominios se declara con
+    ``--first-party``; el caso por defecto es que sean ruido de Chromium.
+    """
+    host = host_of(url_or_host) if "://" in url_or_host else (url_or_host or "").lower()
+    if not host:
+        return False
+    host = host.split(":", 1)[0]
+    if host in BROWSER_INFRASTRUCTURE_HOSTS:
+        return True
+    return registrable_domain(host) in BROWSER_INFRASTRUCTURE
+
+
 TELEMETRY_KEYWORDS = (
     "analytics", "telemetry", "metrics", "tracking", "tracker", "beacon",
     "collect", "stats", "logs", "sentry", "bugsnag", "datadog", "newrelic",
@@ -119,6 +163,11 @@ def is_third_party(url: str, target: str, extra_first_party: list[str] | None = 
     for allowed in extra_first_party or []:
         if domain == registrable_domain(allowed):
             return False
+    if is_browser_infrastructure(host):
+        # Es trafico del navegador, no del portal. Sigue registrado en el
+        # expediente y el reporte lo enumera aparte; lo que no se hace es
+        # imputarlo al sitio auditado.
+        return False
     return True
 
 

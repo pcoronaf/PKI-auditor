@@ -26,7 +26,9 @@ from .config import (
     CredentialMode,
     IsolationMode,
     IsolationPolicy,
+    ProxyConfig,
     normalize_url,
+    proxy_available,
 )
 
 
@@ -111,6 +113,10 @@ def _is_real_credential(answers: dict[str, Any]) -> bool:
 
 def _is_not_real_credential(answers: dict[str, Any]) -> bool:
     return not _is_real_credential(answers)
+
+
+def _is_full_level(answers: dict[str, Any]) -> bool:
+    return str(answers.get("level", "")) == "4"
 
 
 def _is_allowlist(answers: dict[str, Any]) -> bool:
@@ -251,6 +257,26 @@ AUDIT_OPTIONS: tuple[Option, ...] = (
         group="avanzado",
     ),
     Option(
+        id="proxy",
+        label="Interceptacion TLS con proxy",
+        kind=OptionKind.CHOICE,
+        default="auto",
+        depends_on=_is_full_level,
+        help="Permite examinar cuerpos que el depurador del navegador no entrega, "
+             "como una subida multipart con el .key dentro. Usa una CA efimera que "
+             "se destruye al terminar; no se instala nada en el sistema.",
+        choices=(
+            Choice("auto", "Automatico",
+                   "Se activa si mitmproxy esta instalado. Es el nivel 4 completo."),
+            Choice("on", "Siempre",
+                   "Falla de forma visible si mitmproxy no esta disponible, en lugar "
+                   "de continuar sin ese sensor."),
+            Choice("off", "Nunca",
+                   "Sin interceptacion. Lo que el navegador no entregue, no se vera."),
+        ),
+        group="avanzado",
+    ),
+    Option(
         id="capture_bodies",
         label="Guardar cuerpos HTTP en el expediente",
         kind=OptionKind.BOOL,
@@ -343,6 +369,15 @@ def validate(answers: dict[str, Any]) -> list[str]:
     if _is_allowlist(answers) and not answers.get("allow_hosts"):
         problems.append("Lista de permitidos: indique al menos un host, o elija otro "
                         "modo de aislamiento.")
+    if (str(answers.get("proxy") or "") == "on" and _is_full_level(answers)
+            and not proxy_available()):
+        # "Siempre" significa que el operador cuenta con ese sensor. Arrancar sin
+        # el convertiria la ausencia de hallazgos de contenido en una conclusion
+        # infundada, asi que se dice ahora y no al final.
+        problems.append(
+            "Interceptacion TLS con proxy: pidio 'Siempre' pero mitmproxy no esta "
+            "instalado. Instalelo con `pip install 'firmascope[proxy]'`, o elija "
+            "'Automatico' para continuar sin ese sensor.")
     return problems
 
 
@@ -384,6 +419,13 @@ def build_config(answers: dict[str, Any]) -> AuditConfig:
         allow_hosts=_as_list(answers.get("allow_hosts")),
         emulate_offline_flag=bool(answers.get("emulate_offline_flag", True)),
     )
+    # "auto" se deja sin decidir para que el nivel resuelva, que es lo que hace
+    # AuditConfig: nivel 4 activa el proxy si mitmproxy esta instalado.
+    proxy_choice = str(answers.get("proxy") or "auto")
+    proxy = ProxyConfig(
+        enabled={"on": True, "off": False}.get(proxy_choice, None),
+        capture_bodies=bool(answers.get("capture_bodies", False)),
+    )
     return AuditConfig(
         target=normalize_url(str(answers.get("target") or "")),
         level=AuditLevel.parse(str(answers.get("level") or "4")),
@@ -393,6 +435,7 @@ def build_config(answers: dict[str, Any]) -> AuditConfig:
         credential_mode=CredentialMode.parse(str(answers.get("credentials") or "synthetic")),
         acknowledge_real_credentials=bool(answers.get("accept_real_risk", False)),
         isolation=isolation,
+        proxy=proxy,
         first_party_domains=_as_list(answers.get("first_party")),
         note=str(answers.get("note") or ""),
     )

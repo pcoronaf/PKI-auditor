@@ -16,7 +16,13 @@ import json
 
 import pytest
 
-from firmascope.audit_core.config import AuditConfig, IsolationMode, IsolationPolicy
+from firmascope.audit_core.config import (
+    AuditConfig,
+    IsolationMode,
+    IsolationPolicy,
+    ProxyConfig,
+    proxy_available,
+)
 from firmascope.audit_core.orchestrator import AuditSession
 from firmascope.browser_controller.isolation import StageAction
 
@@ -24,14 +30,16 @@ pytestmark = pytest.mark.e2e
 
 
 def run_audit(app: str, output_dir, credential, *, isolation: str = "full",
-              credentials_dir=None):
+              credentials_dir=None, level: int = 4, proxy: bool | None = None):
     """Audita una aplicacion de laboratorio de principio a expediente."""
     config = AuditConfig(
         target=f"http://127.0.0.1:8765/{app}/",
         headless=True,
         output_dir=output_dir,
         note=f"prueba {app}",
+        level=level,
         isolation=IsolationPolicy(mode=IsolationMode.parse(isolation)),
+        proxy=ProxyConfig(enabled=proxy),
     )
     session = AuditSession(config)
 
@@ -79,6 +87,12 @@ def finding(report, rule_id):
 
 def status(report, rule_id):
     return finding(report, rule_id)["status"]
+
+
+def report_requests(output_dir, report):
+    """Peticiones del expediente que acompana a este reporte."""
+    path = output_dir / report["session"] / "requests.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 # ----------------------------------------------------------------------
@@ -176,6 +190,51 @@ def test_tc006_codigo_que_puede_exfiltrar_sin_hacerlo(lab, tmp_path, credential)
     assert status(report, "FS-CODE-001") == "POTENTIAL"
     detalle = finding(report, "FS-CODE-001")["detail"]
     assert "sendBeacon" in detalle or "fetch" in detalle
+
+
+@pytest.mark.skipif(not proxy_available(), reason="mitmproxy no esta instalado")
+def test_tc007_el_proxy_prueba_el_contenido_que_cdp_no_entrega(
+        lab, tmp_path, credential):
+    """Nivel 4: la subida multipart del .key, probada por contenido.
+
+    Sin proxy, "el .key salio" descansa en la procedencia que la
+    instrumentacion infiere, porque CDP entrega el cuerpo vacio. Con proxy se
+    encuentra el canario dentro del cuerpo que viajo de verdad.
+    """
+    lab.SERVER_SIDE.clear()
+    report = run_audit("demo-server-sign", tmp_path, credential,
+                       isolation="none", level=4, proxy=True)
+
+    assert lab.SERVER_SIDE, "el servidor no recibio el material"
+    assert report["sensors"]["proxy"] is True
+    assert report["sensors"]["bodies_recovered_by_proxy"] >= 1, \
+        "el proxy no recupero ningun cuerpo que CDP no entregara"
+
+    # La prueba de contenido: el canario aparece en el cuerpo multipart.
+    pruebas = [q for q in report_requests(tmp_path, report)
+               if q["sensor"] == "proxy" and "KEY_FILE" in q["tags"]]
+    assert pruebas, "ninguna peticion del proxy quedo etiquetada con KEY_FILE"
+    assert status(report, "FS-KEY-001") == "OBSERVED"
+
+
+@pytest.mark.skipif(not proxy_available(), reason="mitmproxy no esta instalado")
+def test_el_expediente_declara_lo_que_no_pudo_observarse(lab, tmp_path, credential):
+    """Sin proxy, el reporte dice que faltó ese sensor en lugar de callarlo."""
+    report = run_audit("demo-safe", tmp_path, credential, level=4, proxy=False)
+    assert report["sensors"]["proxy"] is False
+    assert "limitation" in report["sensors"]
+    assert "multipart" in report["sensors"]["limitation"]
+
+
+def test_el_trafico_del_navegador_no_se_imputa_al_sitio(lab, tmp_path, credential):
+    """Chromium habla con sus propios servicios; eso no es del portal.
+
+    Imputarlo convertiria cualquier auditoria en un hallazgo de terceros.
+    """
+    report = run_audit("demo-safe", tmp_path, credential)
+    imputados = set(report["third_parties_after_key_access"])
+    for host in report.get("browser_infrastructure", {}):
+        assert host not in imputados, f"{host} es del navegador, no del sitio"
 
 
 def test_el_expediente_es_verificable_y_trae_el_informe(lab, tmp_path, credential):

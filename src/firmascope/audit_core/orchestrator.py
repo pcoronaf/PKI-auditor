@@ -207,6 +207,11 @@ class AuditSession:
             info.update(self.controller.versions())
         return info
 
+    def proxy_summary(self) -> dict[str, Any]:
+        if self.controller is None:
+            return {"enabled": False, "detail": "la sesion no abrio el navegador"}
+        return self.controller.proxy_summary()
+
     def isolation_summary(self) -> dict[str, Any]:
         if self.controller is None or self.controller.isolation is None:
             return {}
@@ -238,6 +243,7 @@ class AuditSession:
                               **self.stats.to_dict()}))
 
         isolation = self.isolation_summary()
+        proxy = self.proxy_summary()
         try:
             if self.controller is not None:
                 self.controller.stop()
@@ -257,6 +263,7 @@ class AuditSession:
             credential=self.credential,
             aborted=aborted,
             abort_reason=reason,
+            proxy=proxy,
         )
         self.store.close()
         # El vault muere con la sesion: la clave de correlacion y las

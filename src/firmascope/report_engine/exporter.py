@@ -43,11 +43,47 @@ def _dump(path: Path, payload: Any) -> None:
                     encoding="utf-8")
 
 
+def _browser_infrastructure(requests: list[dict[str, Any]]) -> dict[str, int]:
+    """Destinos propios del navegador, no imputados al sitio auditado."""
+    from ..network_analyzer import domains
+
+    counts: dict[str, int] = {}
+    for request in requests:
+        host = str(request.get("host") or "")
+        if host and domains.is_browser_infrastructure(host):
+            counts[host] = counts.get(host, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
+
+def _sensors(events: list[Any], proxy: dict[str, Any] | None) -> dict[str, Any]:
+    """Que sensores aportaron observaciones, y que no pudo verse sin ellos."""
+    active = {e.sensor for e in events if e.sensor}
+    proxy = proxy or {}
+    recovered = sum(1 for e in events if e.data.get("body_recovered_by_proxy"))
+    info: dict[str, Any] = {
+        "agent": "agent" in active,
+        "cdp": "cdp" in active,
+        "isolation": "isolation" in active,
+        "proxy": bool(proxy.get("running")),
+        "bodies_recovered_by_proxy": recovered,
+    }
+    if not info["proxy"]:
+        info["limitation"] = (
+            "Sin interceptacion TLS, los cuerpos que el navegador no entrega al "
+            "depurador (subidas multipart, flujos) no se examinaron por contenido. "
+            "La procedencia que aporta la instrumentacion sigue siendo valida; lo "
+            "que no hay es prueba de contenido para esas peticiones.")
+    elif proxy.get("error"):
+        info["limitation"] = str(proxy["error"])
+    return info
+
+
 def build_report(store: EvidenceStore, config: AuditConfig, session_id: str,
                  versions: dict[str, Any], static_report: Any = None,
                  isolation: dict[str, Any] | None = None,
                  credential: Any = None, aborted: bool = False,
-                 abort_reason: str = "") -> dict[str, Any]:
+                 abort_reason: str = "",
+                 proxy: dict[str, Any] | None = None) -> dict[str, Any]:
     """Construye el reporte estructurado a partir del expediente."""
     from ..browser_controller.isolation import processing_locality
     from ..rule_engine.context import AuditContext
@@ -91,6 +127,14 @@ def build_report(store: EvidenceStore, config: AuditConfig, session_id: str,
         },
         "processing_locality": processing_locality(events, offline_windows),
         "isolation": isolation or {},
+        # Que sensores estuvieron activos acota lo que el expediente puede
+        # afirmar. Sin proxy, un cuerpo que el navegador no entrego no se pudo
+        # examinar, y eso debe leerse junto a los hallazgos.
+        "sensors": _sensors(events, proxy),
+        "proxy": proxy or {"enabled": False},
+        # Lo excluido de la atribucion, dicho en voz alta: un expediente que
+        # filtra trafico sin declararlo no es verificable.
+        "browser_infrastructure": _browser_infrastructure(requests),
         "third_parties_after_key_access": {
             domain: {"name": names.get(domain, domain), "requests": len(items)}
             for domain, items in sorted(third_parties.items(), key=lambda kv: -len(kv[1]))
@@ -106,14 +150,15 @@ def build_report(store: EvidenceStore, config: AuditConfig, session_id: str,
 def write_package(store: EvidenceStore, config: AuditConfig, session_id: str,
                   versions: dict[str, Any], static_report: Any = None,
                   isolation: dict[str, Any] | None = None, credential: Any = None,
-                  aborted: bool = False, abort_reason: str = "") -> Path:
+                  aborted: bool = False, abort_reason: str = "",
+                  proxy: dict[str, Any] | None = None) -> Path:
     """Escribe el expediente completo y devuelve su directorio."""
     root = store.root
     root.mkdir(parents=True, exist_ok=True)
 
     events = store.events()
     report = build_report(store, config, session_id, versions, static_report,
-                          isolation, credential, aborted, abort_reason)
+                          isolation, credential, aborted, abort_reason, proxy)
 
     _dump(root / "timeline.json", [e.to_dict() for e in events])
     _dump(root / "requests.json", store.requests())
@@ -156,6 +201,21 @@ def write_package(store: EvidenceStore, config: AuditConfig, session_id: str,
 # Resumen de consola
 # ----------------------------------------------------------------------
 
+def _wrap_text(text: str, indent: str = "  ", width: int = 76) -> str:
+    """Ajuste de linea simple para el resumen de terminal."""
+    out: list[str] = []
+    current = ""
+    for word in text.split():
+        if len(current) + len(word) + 1 > width - len(indent):
+            out.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        out.append(current)
+    return ("\n" + indent).join(out)
+
+
 def text_summary(report: dict[str, Any]) -> str:
     """Resumen legible para la terminal."""
     lines: list[str] = []
@@ -184,6 +244,20 @@ def text_summary(report: dict[str, Any]) -> str:
         lines.append("")
         lines.append(f"Intentos de salida bloqueados por el aislamiento: {blocked}"
                      + (f" ({private} con material privado)" if private else ""))
+
+    # Que sensores hubo acota lo que el expediente puede afirmar, asi que se
+    # dice antes de los hallazgos y no en una nota al pie.
+    sensors = report.get("sensors") or {}
+    if sensors:
+        activos = [name for name in ("agent", "cdp", "isolation", "proxy")
+                   if sensors.get(name)]
+        lines.append("")
+        lines.append(f"Sensores activos: {', '.join(activos) or 'ninguno'}")
+        recovered = sensors.get("bodies_recovered_by_proxy") or 0
+        if recovered:
+            lines.append(f"  Cuerpos que solo el proxy pudo examinar: {recovered}")
+        if sensors.get("limitation"):
+            lines.append("  " + _wrap_text(sensors["limitation"], "  "))
 
     lines.append("")
     lines.append("Hallazgos")
@@ -294,6 +368,40 @@ def render_html(report: dict[str, Any]) -> str:
         f"<td>{b.get('body_size', 0)}</td><td>{_esc(', '.join(b.get('tags') or []))}</td></tr>"
         for b in blocked[:50]) or "<tr><td colspan=4>Ninguno.</td></tr>"
 
+    sensors = report.get("sensors") or {}
+    sensor_labels = {
+        "agent": "Instrumentacion en la pagina",
+        "cdp": "Red por DevTools (CDP)",
+        "isolation": "Aislamiento de red",
+        "proxy": "Interceptacion TLS (proxy)",
+    }
+    sensor_rows = "".join(
+        f"<tr><td>{_esc(label)}</td>"
+        f"<td><strong>{'activo' if sensors.get(key) else 'ausente'}</strong></td></tr>"
+        for key, label in sensor_labels.items()) or \
+        "<tr><td colspan=2>Sin informacion de sensores.</td></tr>"
+    recovered = sensors.get("bodies_recovered_by_proxy") or 0
+    sensor_note = ""
+    if sensors.get("limitation"):
+        sensor_note = f'<div class="note">{_esc(sensors["limitation"])}</div>'
+    elif recovered:
+        sensor_note = (f'<p class="sub">{recovered} cuerpos pudieron examinarse solo '
+                       f'gracias al proxy: el depurador del navegador no los entrega.</p>')
+
+    infrastructure = report.get("browser_infrastructure") or {}
+    infra_rows = "".join(f"<tr><td>{_esc(h)}</td><td>{n}</td></tr>"
+                         for h, n in infrastructure.items())
+    infra_html = ""
+    if infra_rows:
+        infra_html = f"""
+  <h2>Trafico del propio navegador</h2>
+  <div class="card">
+    <p class="sub">Destinos de los servicios de Chromium (actualizaciones,
+    autocompletado, deteccion de phishing). Quedan registrados pero <strong>no se
+    imputan al sitio auditado</strong>: no los pidio el portal.</p>
+    <table><thead><tr><th>Destino</th><th>Peticiones</th></tr></thead>
+    <tbody>{infra_rows}</tbody></table></div>"""
+
     warnings_html = "".join(f'<div class="note">{_esc(w)}</div>'
                             for w in report.get("warnings") or [])
     aborted_html = (f'<div class="note">Sesion cancelada: '
@@ -327,6 +435,15 @@ def render_html(report: dict[str, Any]) -> str:
         <code>{_esc(integrity['chain_head'][:32])}</code></dd>
   </dl></div>
 
+  <h2>Sensores de esta sesion</h2>
+  <div class="card">
+    <p class="sub">Lo que el expediente puede afirmar depende de lo que se pudo
+    observar. Un sensor ausente no deja hallazgos vacios: deja preguntas sin
+    responder.</p>
+    <table><tbody>{sensor_rows}</tbody></table>
+    {sensor_note}
+  </div>
+
   <h2>Localidad del procesamiento</h2>
   <div class="card"><table><tbody>{locality_rows or
       '<tr><td colspan=2>Sin hitos observados.</td></tr>'}</tbody></table></div>
@@ -343,6 +460,7 @@ def render_html(report: dict[str, Any]) -> str:
   <div class="card"><table>
     <thead><tr><th>Metodo</th><th>Destino</th><th>Bytes</th><th>Etiquetas</th></tr></thead>
     <tbody>{blocked_rows}</tbody></table></div>
+{infra_html}
 
   <footer>
     <p>FirmaScope {_esc(report['versions'].get('firmascope', ''))}. Este reporte describe

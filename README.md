@@ -126,6 +126,53 @@ correcto debe hacer — se reportaría como exfiltración.
 
 ---
 
+## Los cuatro sensores
+
+Ninguno ve el cuadro completo, y por eso son cuatro:
+
+| Sensor | Qué aporta | Qué no puede ver |
+|---|---|---|
+| Instrumentación en la página | la **procedencia**: etiqueta el dato al leer el archivo y lo sigue por las APIs | la construcción de cadenas carácter a carácter |
+| CDP (DevTools) | la petición del navegador, con initiator y pila de llamadas | cuerpos que Chromium no materializa (multipart, flujos) |
+| Aislamiento de red | si la petición **llegó a salir**, porque es quien la aborta | nada de lo que ocurre dentro de la página |
+| Proxy (mitmproxy) | el **contenido exacto** que viajó, tras terminar el TLS | lo que no pasa por HTTP(S) |
+
+El caso que obliga a tener los cuatro es la subida del `.key` por
+`multipart/form-data`, el patrón más común de todos: CDP entrega el cuerpo
+vacío, así que sin proxy la afirmación «el `.key` salió» descansa sólo en la
+procedencia que el agente infiere. Con proxy se encuentra la representación del
+canario **dentro del cuerpo que viajó**, y la inferencia se convierte en prueba
+de contenido.
+
+El reverso también importa: una petición que el agente vio y el aislamiento
+abortó no salió, aunque tres sensores la hayan observado. El
+[motor de correlación](src/firmascope/correlation_engine/sensors.py) agrupa las
+observaciones de una misma petición y deja una sola conclusión, con una regla
+que no es estadística: *si un sensor con autoridad para negarla la negó, no
+salió*.
+
+Cada reporte declara qué sensores hubo. Un sensor ausente no produce hallazgos
+vacíos: produce preguntas sin responder, y el reporte lo dice.
+
+### Sobre la CA del proxy
+
+La CA es **efímera**: vive en un directorio temporal que se borra al cerrar la
+sesión, y el navegador la acepta sólo porque el contexto de Playwright se abre
+con `ignore_https_errors`. FirmaScope **no instala certificados en el almacén
+del sistema**, porque una CA de auditoría que sobrevive a la auditoría es una
+puerta abierta: quien obtenga su clave privada puede suplantar cualquier sitio
+para ese usuario.
+
+El addon se ejecuta **dentro del proceso** de FirmaScope, no como un
+`mitmdump -s` aparte. Para buscar los canarios hay que conocerlos, y los
+canarios son el material de la credencial: pasárselos a otro proceso por
+archivo, variable de entorno o socket sería sacar de la memoria exactamente lo
+que la herramienta promete no sacar. Cargado con `mitmdump -s` también
+funciona, pero sin vault — registra metadatos y digests, y no puede afirmar nada
+sobre el contenido.
+
+---
+
 ## Protección de secretos
 
 - Los secretos observados **no se escriben a disco**.
@@ -204,13 +251,14 @@ Otras desviaciones deliberadas respecto de la especificación:
 | Motor de correlación de sensores | implementado |
 | Motor de reportes (HTML + JSON) | implementado |
 | CLI con asistente interactivo | implementado |
+| Addon de mitmproxy (interceptación TLS, nivel 4) | implementado |
 | Aplicaciones de laboratorio (5, con lógica) | implementado |
-| Pruebas TC-001..TC-006 + unitarias (35) | implementado |
-| Addon de mitmproxy (nivel 4 con proxy) | **pendiente** |
+| Pruebas TC-001..TC-007 + unitarias (57) | implementado |
 | Interfaz gráfica (Tauri) | **pendiente** |
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/ -q     # 35 pruebas
+pip install -e ".[proxy,dev]"
+PYTHONPATH=src python3 -m pytest tests/ -q                # 57 pruebas
 PYTHONPATH=src python3 -m pytest tests/ -q -m "not e2e"   # sin navegador
 ```
 
@@ -233,9 +281,12 @@ revelaba, y los tres están cubiertos por pruebas de regresión:
    porque la fuente se descartaba cuando su tipo no podía deducirse del nombre
    de la expresión — y `input.files[0] -> FileReader -> btoa -> fetch` no nombra
    la clave en ninguna parte.
-3. **La subida del `.key` por `multipart/form-data` no se detectaba**, porque
+3. **La subida del `.key` por `multipart/form-data` no se detectaba.**
    `FormData.append` no guarda el objeto etiquetado sino un `File` nuevo con los
-   mismos bytes, y la procedencia se perdía justo antes del envío.
+   mismos bytes, así que la procedencia se perdía justo antes del envío; y como
+   CDP entrega ese cuerpo vacío, tampoco había forma de probarlo por contenido.
+   Lo primero se corrigió en la instrumentación y el análisis estático; lo
+   segundo es lo que resuelve el proxy.
 
 ### Límites conocidos
 
@@ -247,6 +298,9 @@ revelaba, y los tres están cubiertos por pruebas de regresión:
   ocultar flujos que existen. **Ausencia de rutas no es ausencia de capacidad.**
 - El aislamiento intercepta peticiones HTTP; un WebSocket abierto antes del
   corte no se aborta por esa vía.
+- El proxy ve lo que pasa por HTTP(S). Un sitio con *certificate pinning*
+  rechazará la CA efímera, y ese destino queda sin observar: el reporte lo
+  registra como fallo de TLS en lugar de presentarlo como ausencia de tráfico.
 
 ---
 
@@ -284,8 +338,12 @@ playwright      control del navegador y CDP
 cryptography    credenciales sintéticas
 PyYAML          paquetes de reglas
 tree-sitter     análisis estático de JavaScript
-mitmproxy       opcional, nivel 4
+mitmproxy       opcional, interceptación TLS del nivel 4
 ```
+
+Sin mitmproxy, el nivel 4 funciona con tres sensores y el reporte declara que
+falta el cuarto. Para exigirlo en lugar de degradar, elija «Siempre» en la
+opción *Interceptación TLS con proxy*: la auditoría no arranca si no está.
 
 FirmaScope busca un Chromium ya instalado (variable `FIRMASCOPE_CHROMIUM_PATH`,
 `PLAYWRIGHT_BROWSERS_PATH` o `/opt/pw-browsers`) antes de recurrir al de

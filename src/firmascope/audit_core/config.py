@@ -213,6 +213,39 @@ def normalize_url(url: str) -> str:
     return "https://" + text
 
 
+#: Argumentos del navegador de auditoria. Chromium habla con sus propios
+#: servicios (autocompletado, actualizaciones, sincronizacion, telemetria de
+#: dominios) y ese trafico no es del sitio auditado: contamina la clasificacion
+#: de terceros y, con proxy, llena el registro de fallos de TLS por fijacion de
+#: certificado que no significan nada. Un perfil de auditoria debe estar
+#: callado para que lo que se observe sea atribuible al portal.
+QUIET_BROWSER_ARGS: tuple[str, ...] = (
+    "--no-sandbox",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-breakpad",
+    "--disable-component-update",
+    "--disable-domain-reliability",
+    "--disable-sync",
+    "--no-default-browser-check",
+    "--no-first-run",
+    "--disable-client-side-phishing-detection",
+    "--safebrowsing-disable-auto-update",
+    "--metrics-recording-only",
+    "--disable-features=OptimizationHints,Translate,MediaRouter,AutofillServerCommunication",
+)
+
+
+def proxy_available() -> bool:
+    """``True`` si mitmproxy puede usarse. No lo importa: solo lo busca."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("mitmproxy") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def default_chromium_path() -> str | None:
     """Localiza un Chromium utilizable sin descargar nada.
 
@@ -249,9 +282,14 @@ def default_chromium_path() -> str | None:
 
 @dataclass
 class ProxyConfig:
-    """Configuracion del proxy de interceptacion (nivel 4)."""
+    """Configuracion del proxy de interceptacion (nivel 4).
 
-    enabled: bool = False
+    ``enabled`` a ``None`` significa "decidelo por el nivel": el nivel 4 lo
+    activa si mitmproxy esta instalado. ``True`` o ``False`` son decisiones
+    explicitas del operador y se respetan.
+    """
+
+    enabled: bool | None = None
     host: str = "127.0.0.1"
     port: int = 0                 # 0 = puerto libre elegido en tiempo de ejecucion
     #: CA efimera: FirmaScope no instala certificados permanentes en el sistema.
@@ -276,7 +314,7 @@ class AuditConfig:
     output_dir: Path = Path("audits")
     headless: bool = True
     browser_path: str | None = field(default_factory=default_chromium_path)
-    browser_args: list[str] = field(default_factory=lambda: ["--no-sandbox"])
+    browser_args: list[str] = field(default_factory=lambda: list(QUIET_BROWSER_ARGS))
     viewport: tuple[int, int] = (1280, 900)
     #: Segundos maximos de sesion interactiva antes de cerrar automaticamente.
     max_duration: float = 900.0
@@ -309,8 +347,13 @@ class AuditConfig:
         self.level = AuditLevel(self.level)
         self.rules_dirs = [Path(p) for p in self.rules_dirs]
         self.credential_mode = CredentialMode(self.credential_mode)
-        if self.level >= AuditLevel.FULL_CORRELATED and self.proxy.port == 0:
-            self.proxy.enabled = self.proxy.enabled or False
+        if self.level >= AuditLevel.FULL_CORRELATED and self.proxy.enabled is None:
+            # El nivel 4 incluye interceptacion TLS por definicion, pero solo si
+            # mitmproxy esta disponible: pedirla y no tenerla haria que la
+            # ausencia de hallazgos de contenido no significara nada.
+            self.proxy.enabled = proxy_available()
+        elif self.proxy.enabled is None:
+            self.proxy.enabled = False
         if self.credential_mode.is_real:
             self._harden_for_real_credentials()
         elif self.credential_mode is not CredentialMode.SYNTHETIC:
@@ -392,7 +435,7 @@ class AuditConfig:
 
     @property
     def proxy_enabled(self) -> bool:
-        return self.proxy.enabled and self.level >= AuditLevel.FULL_CORRELATED
+        return bool(self.proxy.enabled) and self.level >= AuditLevel.FULL_CORRELATED
 
     def to_dict(self) -> dict[str, Any]:
         return {

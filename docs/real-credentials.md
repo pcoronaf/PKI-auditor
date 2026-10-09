@@ -150,6 +150,36 @@ del propio navegador: FirmaScope lo detecta.
 El primer objetivo es el que define qué cuenta como «tercero» durante el resto
 de la sesión.
 
+## La interceptación TLS con su e.firma real
+
+El nivel 4 añade un proxy que termina el TLS para poder examinar los cuerpos que
+el depurador del navegador no entrega — entre ellos, una subida
+`multipart/form-data` con el `.key` dentro. Con credencial real conviene
+entender exactamente qué implica:
+
+**Lo que gana.** Si el portal transmite su clave, el hallazgo pasa de *inferido*
+a *probado*: no se deduce de la procedencia que la instrumentación sigue, se
+encuentra la representación del canario dentro del cuerpo que viajó. Para una
+decisión tan costosa como revocar una e.firma, esa diferencia importa.
+
+**Lo que cuesta.** El cuerpo descifrado pasa por la memoria del proceso de
+FirmaScope. No se escribe en disco: con credencial real, `capture_bodies` se
+fuerza a falso y no se puede reactivar. Pero durante unos milisegundos esos
+bytes están en memoria, igual que ya lo está su clave descifrada para poder
+generar los canarios.
+
+**Lo que no ocurre.** La CA es efímera, vive en un directorio temporal y se
+borra al cerrar la sesión. FirmaScope no instala certificados en el almacén del
+sistema: el navegador de la auditoría acepta esa CA y nada más en su equipo lo
+hace. Si el portal usa *certificate pinning*, rechazará la CA y ese destino
+quedará sin observar; el reporte lo registra como fallo de TLS en lugar de
+presentarlo como ausencia de tráfico.
+
+Si prefiere no interceptar, elija «Nunca» en *Interceptación TLS con proxy*, o
+audite en nivel 3. Pierde la prueba de contenido, no la de procedencia.
+
+---
+
 ## Qué se endurece automáticamente en modo real
 
 Estas restricciones **no son configurables**, porque el daño no sería
