@@ -43,6 +43,7 @@ navegador.
 firmascope audit [URL]        auditar un sitio
 firmascope audit URL --auto   auditar sin operador (sólo credencial sintética)
 firmascope login URL          iniciar sesión en el portal y guardarla (--session)
+firmascope panel [URL]        la interfaz en el navegador (abre un puerto local)
 firmascope options            listar las opciones configurables (--json para una GUI)
 firmascope credentials new    generar una credencial sintética de laboratorio
 firmascope rules [--json]     listar el catálogo (--rules DIR añade paquetes propios)
@@ -142,6 +143,34 @@ de la CLI, y el núcleo valida. Habla con él por **JSON por línea sobre stdio*
 no por un puerto local: FirmaScope maneja la e.firma del operador, y un puerto
 abierto es alcanzable por cualquier página que el usuario tenga abierta en
 cualquier navegador. Detalles en [`gui/README.md`](gui/README.md).
+
+En la etapa de firma, la tarjeta de la credencial sintética tiene botones para
+copiar cada ruta y la contraseña. En los eventos en vivo, una salida por la que
+viaja material privado (la clave o su contraseña) se resalta en rojo, también
+si el aislamiento la bloqueó: el sitio lo intentó. Qué cuenta como tal lo decide
+el núcleo (`is_private_egress`), con el mismo criterio que las reglas.
+
+### Panel en el navegador (`firmascope panel`)
+
+```bash
+firmascope panel                                # o: firmascope audit https://portal.ejemplo.mx --panel
+```
+
+Es **la misma interfaz**, servida por el núcleo en `127.0.0.1` para abrirla en el
+navegador habitual, sin compilar nada. Los argumentos de `audit ... --panel`
+precargan el formulario.
+
+> **Riesgo:** el panel abre un puerto local. Cualquier página web abierta y
+> cualquier programa del equipo pueden intentar conectarse a él, y lo que viaja
+> por él —incluida la contraseña de una e.firma propia— va sin cifrar dentro del
+> equipo. Lo protegen un código de un solo uso en la URL, un token por sesión en
+> una cabecera propia, la comprobación de `Host` y de origen, y una CSP que solo
+> permite los ficheros de la interfaz. No lo use en un equipo compartido;
+> la aplicación de escritorio no abre ningún puerto. El aviso se muestra al
+> arrancar y en la propia página.
+
+Cerrar o recargar la pestaña no aborta la auditoría; el panel se cierra con
+Ctrl-C en la terminal, que cierra también el expediente.
 
 ### Credencial de prueba o credencial real
 
@@ -330,6 +359,7 @@ Otras desviaciones deliberadas respecto de la especificación:
 | Aplicaciones de laboratorio (9) | implementado |
 | Auditoría dentro de una sesión iniciada (`login`, `--session`) | implementado |
 | Interfaz gráfica (Tauri) | implementado |
+| Panel en el navegador (`firmascope panel`, misma interfaz) | implementado |
 | Pruebas TC-001..TC-011, GUI y unitarias, con CI | implementado |
 
 ```bash

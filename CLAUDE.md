@@ -58,8 +58,24 @@ PYTHONPATH=src python3 -m pytest tests/ -q -m "not e2e"   # sin navegador
 - **El sandbox de Chromium queda activado** salvo como root o con decisión
   explícita (`--no-sandbox`, `FIRMASCOPE_NO_SANDBOX=1`). Todo arranque pasa por
   `browser_controller/launch.py`.
-- **La interfaz gráfica habla con el núcleo por stdio**, nunca por un puerto
-  local: un puerto es alcanzable por cualquier página abierta en el equipo.
+- **La interfaz gráfica habla con el núcleo por stdio**, no por un puerto
+  local: un puerto es alcanzable por cualquier página abierta y cualquier
+  programa del equipo. **Excepción aceptada: el panel** (`firmascope panel`,
+  `audit --panel`), que sirve la misma interfaz en el navegador para no exigir
+  compilar Tauri. Es aceptable mientras conserve todas estas condiciones; quitar
+  una no es un refactor, es reabrir la decisión:
+  - es opcional y explícito: nada abre el panel por omisión;
+  - escucha solo en `127.0.0.1`, en un puerto al azar salvo `--port`;
+  - exige la cabecera `Host` propia (DNS rebinding), un token por sesión en
+    `X-FS-Token`, cuerpo JSON y ningún `Origin`/`Sec-Fetch-Site` ajeno;
+  - el token nunca va en la URL: la URL lleva un código de un solo uso;
+  - sirve solo los ficheros de `firmascope/ui`, con CSP `'self'`;
+  - **avisa del riesgo** (`PANEL_WARNING`) al arrancar en la terminal y en la
+    propia página, y recomienda la aplicación de escritorio;
+  - es otro transporte del mismo `Bridge` y la misma `app.js`, no una segunda
+    interfaz.
+
+  Cualquier otro puerto local sigue sin ser aceptable.
 - **El piloto automático sólo funciona con credencial sintética.**
 - La instrumentación **no puede alterar el sitio auditado**: si lo rompe, se
   audita un flujo que no existe.

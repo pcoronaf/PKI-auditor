@@ -53,7 +53,7 @@ from typing import Any, Callable
 from .. import __version__
 from ..audit_core import options as options_module
 from ..audit_core.config import REAL_CREDENTIAL_WARNINGS, environment_info, proxy_available
-from ..audit_core.events import Event
+from ..audit_core.events import Event, is_private_egress
 from ..audit_core.orchestrator import AuditSession
 from ..browser_controller.isolation import StageAction
 
@@ -77,7 +77,13 @@ class Bridge:
     probar el protocolo entero sin lanzar procesos.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, seed: dict[str, Any] | None = None, notice: str = "") -> None:
+        #: Respuestas precargadas (``firmascope audit URL --panel``): aparecen
+        #: como valores iniciales del formulario, que el operador puede cambiar.
+        self.seed = dict(seed or {})
+        #: Aviso sobre como se esta ejecutando la interfaz; la interfaz lo
+        #: muestra tal cual. El panel lo usa para el riesgo de su puerto.
+        self.notice = notice
         self.session: AuditSession | None = None
         self.test: Any = None
         self.events: deque[dict[str, Any]] = deque(maxlen=MAX_PENDING_EVENTS)
@@ -120,11 +126,13 @@ class Bridge:
             "environment": environment_info(),
             "proxy_available": proxy_available(),
             "real_credential_warnings": list(REAL_CREDENTIAL_WARNINGS),
+            "notice": self.notice,
         }
 
     def cmd_schema(self) -> dict[str, Any]:
-        return {"options": options_module.schema(),
-                "defaults": options_module.defaults()}
+        defaults = options_module.defaults()
+        defaults.update({k: v for k, v in self.seed.items() if k in defaults})
+        return {"options": options_module.schema(), "defaults": defaults}
 
     def cmd_validate(self, answers: dict[str, Any] | None = None) -> dict[str, Any]:
         answers = dict(answers or {})
@@ -369,7 +377,9 @@ class Bridge:
     def _collect(self, event: Event) -> None:
         if len(self.events) == self.events.maxlen:
             self.dropped += 1
-        self.events.append(event.to_dict())
+        item = event.to_dict()
+        item["private_egress"] = is_private_egress(event)
+        self.events.append(item)
 
     def _take_events(self) -> list[dict[str, Any]]:
         items = list(self.events)

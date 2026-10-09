@@ -146,6 +146,18 @@ def is_key_access(event: "Event") -> bool:
     return True
 
 
+def is_private_egress(event: "Event") -> bool:
+    """True si el evento es una salida por la que viaja material privado.
+
+    Es lo que la interfaz resalta en vivo. Lo decide el nucleo y no la
+    interfaz: que etiquetas son privadas y que eventos son salidas son
+    criterios de las reglas, y una segunda lista en JavaScript acabaria
+    discrepando de ellas. Un intento bloqueado tambien cuenta: el sitio
+    intento sacar la clave aunque no lo consiguiera.
+    """
+    return event.type in EGRESS_EVENTS and event.has_private_tag()
+
+
 def now() -> float:
     """Marca temporal de pared, en segundos con fraccion (epoch)."""
     return time.time()
