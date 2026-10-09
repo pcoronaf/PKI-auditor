@@ -85,7 +85,9 @@ herramienta:
   aprobado, es una pregunta sin responder.
 
 **Reserve `CONFIRMED` para experimentos.** Sólo `FS-LOCAL-001` lo emite, porque
-descansa en una intervención (aislar la red) y no en una observación pasiva.
+descansa en una intervención (aislar la red) y no en una observación pasiva. Y
+sólo con aislamiento total (`IsolationPolicy.is_total()`): con «solo terceros» el
+servidor del sitio sigue alcanzable y la firma pudo apoyarse en él.
 
 **`POTENTIAL` es para capacidad, no para conducta.** Las reglas alimentadas por
 el análisis estático describen lo que el código *puede* hacer.

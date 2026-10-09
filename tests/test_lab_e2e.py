@@ -1,4 +1,4 @@
-"""Pruebas de extremo a extremo contra el laboratorio (TC-001 .. TC-011).
+"""Pruebas de extremo a extremo contra el laboratorio (TC-001 .. TC-016).
 
 Son las unicas pruebas que pueden responder si FirmaScope *funciona*: lanzan un
 Chromium real contra las aplicaciones de laboratorio y comparan los hallazgos
@@ -430,22 +430,19 @@ def test_sin_sesion_el_portal_no_muestra_el_formulario(lab, tmp_path):
     assert status(report, "FS-LOCAL-001") != "CONFIRMED"
 
 
-def test_tc012_la_contrasena_de_la_cuenta_no_es_la_de_la_efirma(lab, tmp_path, credential):
-    """El primer piloto del panel: iniciar sesion en el portal *dentro* del
-    navegador auditado se reporto como "la contrasena de la e.firma salio".
-
-    La instrumentacion marca cualquier campo de tipo contrasena; los sensores
-    que ven el cuerpo deciden si lo que viajo era la contrasena registrada.
-    """
-    lab.LOGIN_PINGS.clear()
+def run_login_audit(lab, output_dir, credential, *, signing=None):
+    """demo-login: el operador inicia sesion en el portal dentro del navegador
+    auditado y despues firma. ``signing`` es la credencial que carga en la
+    pagina; por omision, la registrada en la sesion."""
+    signing = signing or credential
     config = AuditConfig(target="http://127.0.0.1:8765/demo-login/", headless=True,
-                         output_dir=tmp_path, isolation=IsolationPolicy(mode=IsolationMode.FULL))
+                         output_dir=output_dir,
+                         isolation=IsolationPolicy(mode=IsolationMode.FULL))
     session = AuditSession(config)
 
     def drive(stage, index, test):
         page = session.controller.page
         if stage.name == "prepare":
-            # El operador inicia sesion en el propio navegador auditado.
             page.wait_for_selector("#account-password", timeout=15000)
             page.fill("#username", lab.LAB_LOGIN_USER)
             page.fill("#account-password", lab.LAB_LOGIN_PASSWORD)
@@ -453,9 +450,9 @@ def test_tc012_la_contrasena_de_la_cuenta_no_es_la_de_la_efirma(lab, tmp_path, c
             page.wait_for_selector("#sign", timeout=15000)
             page.wait_for_timeout(1000)
         elif stage.name == "sign":
-            page.set_input_files("#cer-file", str(credential.cert_path))
-            page.set_input_files("#key-file", str(credential.key_path))
-            page.fill("#password", credential.password)
+            page.set_input_files("#cer-file", str(signing.cert_path))
+            page.set_input_files("#key-file", str(signing.key_path))
+            page.fill("#password", signing.password)
             page.click("#sign")
             page.wait_for_timeout(3000)
         elif stage.name == "submit":
@@ -465,7 +462,7 @@ def test_tc012_la_contrasena_de_la_cuenta_no_es_la_de_la_efirma(lab, tmp_path, c
         return StageAction.CONTINUE
 
     try:
-        session.prepare_credentials(credentials_dir=tmp_path / "cred")
+        session.prepare_credentials(credentials_dir=output_dir / "cred")
         session.credential = credential
         credential.register(session.vault)
         session.start_browser()
@@ -475,7 +472,18 @@ def test_tc012_la_contrasena_de_la_cuenta_no_es_la_de_la_efirma(lab, tmp_path, c
         session.evaluate()
     finally:
         package = session.finish()
-    report = json.loads((package / "report.json").read_text(encoding="utf-8"))
+    return json.loads((package / "report.json").read_text(encoding="utf-8")), package
+
+
+def test_tc012_la_contrasena_de_la_cuenta_no_es_la_de_la_efirma(lab, tmp_path, credential):
+    """El primer piloto del panel: iniciar sesion en el portal *dentro* del
+    navegador auditado se reporto como "la contrasena de la e.firma salio".
+
+    La instrumentacion marca cualquier campo de tipo contrasena; los sensores
+    que ven el cuerpo deciden si lo que viajo era la contrasena registrada.
+    """
+    lab.LOGIN_PINGS.clear()
+    report, _ = run_login_audit(lab, tmp_path, credential)
 
     assert lab.LOGIN_PINGS, "el inicio de sesion no llego a hacerse"
     hallazgo = finding(report, "FS-PWD-001")
@@ -483,7 +491,51 @@ def test_tc012_la_contrasena_de_la_cuenta_no_es_la_de_la_efirma(lab, tmp_path, c
     assert "Otro campo de contrasena" in hallazgo["detail"]
     # Y la firma, que es lo que se audita, sigue siendo local.
     assert status(report, "FS-LOCAL-001") == "CONFIRMED"
+    assert not report["warnings"], "con la llave registrada no hay nada que advertir"
 
+
+def test_tc015_otra_llave_en_la_pagina_se_advierte_y_no_se_descarta(lab, tmp_path, credential):
+    """El piloto con la e.firma real (FS-2026-0007): sesion en modo sintetico,
+    y en el portal el operador cargo otra llave, con una contrasena de otra
+    longitud. Nada lo advirtio, y el reporte dijo que nadie habia leido la
+    contrasena: la descarto por no medir lo mismo que la sintetica."""
+    from firmascope.credentials import generator
+
+    otra = generator.generate(password="Otra1234").write(tmp_path / "otra")
+    assert len(otra.password) != len(credential.password)
+    lab.LOGIN_PINGS.clear()
+    report, package = run_login_audit(lab, tmp_path, credential, signing=otra)
+
+    assert lab.LOGIN_PINGS, "el inicio de sesion no llego a hacerse"
+    timeline = json.loads((package / "timeline.json").read_text(encoding="utf-8"))
+    avisos = [e for e in timeline if e["type"] == "CHECKPOINT"
+              and e["data"].get("name") == "credential-mismatch"]
+    assert len(avisos) == 1, "la sesion no advirtio la llave ajena"
+    assert any(".key distinto" in w for w in report["warnings"]), report["warnings"]
+
+    # La contrasena que se uso se leyo, y sin red: no se descarta por longitud.
+    assert report["processing_locality"]["Password access"] == "OFFLINE"
+    hallazgo = finding(report, "FS-PWD-001")
+    assert "no llego a usar" not in hallazgo["summary"], hallazgo["summary"]
+    # El laboratorio no envia la contrasena, y el inicio de sesion no es la e.firma.
+    assert hallazgo["status"] == "NOT_OBSERVED", hallazgo["summary"]
+    assert "Otro campo de contrasena" in hallazgo["detail"]
+
+
+def test_tc016_solo_terceros_no_demuestra_firma_local(lab, tmp_path, credential):
+    """Con "solo terceros" el servidor del portal sigue alcanzable: el piloto
+    del portal real hablo con el en plena ventana, y el reporte la llamaba
+    OFFLINE. Firmar ahi no demuestra que la firma sea local."""
+    lab.COLLECTED.clear()
+    report = run_audit("demo-safe", tmp_path, credential, isolation="third-party")
+
+    assert not lab.COLLECTED
+    hallazgo = finding(report, "FS-LOCAL-001")
+    assert hallazgo["status"] == "INCONCLUSIVE", hallazgo["summary"]
+    assert report["processing_locality"]["Signature generation"] == "SIN TERCEROS"
+    manifest = json.loads((tmp_path / report["session"] / "manifest.json")
+                          .read_text(encoding="utf-8"))
+    assert manifest["network_mode"] == "PARTIAL-ISOLATION-TESTED"
 
 
 def test_tc013_la_llave_sintetica_tiene_el_formato_del_sat(lab, tmp_path):

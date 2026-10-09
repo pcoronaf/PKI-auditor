@@ -255,6 +255,30 @@ def siguiente(page) -> bool:
     return True
 
 
+def test_el_aviso_de_llave_ajena_queda_fijo(gui):
+    """El nucleo avisa (CHECKPOINT credential-mismatch, cubierto por TC-015) si
+    en la pagina se elige un .key que no es el de la sesion. En el piloto con
+    la e.firma real nada lo advirtio: el aviso no puede perderse entre los
+    eventos que se desplazan."""
+    configurar(gui)
+    gui.click("#start")
+    gui.wait_for_selector("#view-session:not([hidden])", timeout=60000)
+    assert gui.query_selector("#credential-warning[hidden]") is not None
+
+    gui.evaluate("""() => addEvent({type: 'CHECKPOINT', tags: [], data: {
+        name: 'credential-mismatch',
+        message: 'El .key que eligio en la pagina no es el de esta sesion.'}})""")
+    aviso = gui.wait_for_selector("#credential-warning:not([hidden])", timeout=5000)
+    assert "no es el de esta sesion" in aviso.inner_text()
+    # Los demas CHECKPOINT no ensucian la lista de eventos en vivo.
+    assert "credential-mismatch" not in gui.inner_text("#feed")
+
+    gui.on("dialog", lambda d: d.accept())
+    gui.click("[data-action='cancel']")
+    gui.wait_for_selector("#view-report:not([hidden])", timeout=120000)
+    assert not gui.errors, f"errores de consola: {gui.errors}"
+
+
 # ----------------------------------------------------------------------
 # Copiar la credencial y resaltar la salida de material privado
 # ----------------------------------------------------------------------

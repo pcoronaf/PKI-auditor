@@ -158,6 +158,33 @@ def is_private_egress(event: "Event") -> bool:
     return event.type in EGRESS_EVENTS and event.has_private_tag()
 
 
+def foreign_key_digest(event: "Event", registered_sha256: str | None) -> str | None:
+    """SHA-256 del ``.key`` elegido en la pagina si no es el de la credencial.
+
+    En el piloto del portal real, la sesion estaba en modo sintetico y el
+    operador cargo su e.firma. Nada lo advirtio: los canarios buscaban la llave
+    sintetica, la contrasena real no estaba protegida en el vault, y el reporte
+    descarto la lectura de la contrasena real por no medir lo mismo que la
+    sintetica. El agente calcula el SHA-256 de cada archivo elegido; si el del
+    ``.key`` no es el registrado, el material en uso es otro. Sin digest de
+    alguno de los dos lados no se afirma nada.
+
+    El digest se lee ya redactado, como lo guarda el expediente. El SHA-256 del
+    ``.key`` registrado es una de las representaciones de su canario, asi que
+    llega como ``<canary:KEY_FILE>``: esa es la prueba mas fuerte de que es el
+    mismo. Otro marcador (``<redactado:digest>``) no permite decidir. Un digest
+    sin marcar, en claro o como fingerprint de sesion (modo real), es otro.
+    """
+    if event.type is not EventType.FILE_SELECTED or Tag.KEY_FILE.value not in event.tags:
+        return None
+    digest = str(event.data.get("sha256") or "").strip().lower()
+    if not digest or not registered_sha256 or digest == registered_sha256.lower():
+        return None
+    if digest.startswith("<"):
+        return None
+    return digest
+
+
 def now() -> float:
     """Marca temporal de pared, en segundos con fraccion (epoch)."""
     return time.time()

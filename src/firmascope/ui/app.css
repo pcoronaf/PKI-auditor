@@ -109,6 +109,9 @@ ol.stages li .net { font-size: 11px; opacity: .8; }
 .notice { margin: 12px auto 0; max-width: calc(1400px - 44px); padding: 10px 14px;
   border: 1px solid var(--warn, #d97706); border-radius: 6px;
   background: rgba(217, 119, 6, 0.12); color: var(--fg, inherit); }
+/* Aviso del nucleo: el .key cargado en la pagina no es el de la sesion. */
+.notice.danger { margin: 0 0 12px; max-width: none; border-color: var(--bad, #dc2626);
+  background: rgba(220, 38, 38, 0.12); font-weight: 600; }
 .feed .empty { color: var(--muted); font-family: inherit; }
 
 /* Reporte */

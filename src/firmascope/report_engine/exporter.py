@@ -55,6 +55,15 @@ def _browser_infrastructure(requests: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
 
 
+def _network_mode(config: AuditConfig, windows: int) -> str:
+    """Modo de red del manifiesto: OFFLINE-TESTED solo si el aislamiento fue total."""
+    if not windows:
+        return "ONLINE"
+    if config.isolation.is_total():
+        return "OFFLINE-TESTED"
+    return "PARTIAL-ISOLATION-TESTED"
+
+
 def _sensors(events: list[Any], proxy: dict[str, Any] | None) -> dict[str, Any]:
     """Que sensores aportaron observaciones, y que no pudo verse sin ellos."""
     active = {e.sensor for e in events if e.sensor}
@@ -131,7 +140,8 @@ def build_report(store: EvidenceStore, config: AuditConfig, session_id: str,
         # La contrasena de la cuenta del portal no es "acceso a la contrasena"
         # de la e.firma: mismo criterio que las reglas.
         "processing_locality": processing_locality(
-            [e for e in events if not context.is_other_password_read(e)], offline_windows),
+            [e for e in events if not context.is_other_password_read(e)], offline_windows,
+            config.isolation.window_label()),
         "isolation": isolation or {},
         # Que sensores estuvieron activos acota lo que el expediente puede
         # afirmar. Sin proxy, un cuerpo que el navegador no entrego no se pudo
@@ -149,8 +159,22 @@ def build_report(store: EvidenceStore, config: AuditConfig, session_id: str,
                                                     f["rule_id"])),
         "static_analysis": static_report.to_dict() if static_report is not None else {},
         "status_meaning": {status.value: text for status, text in STATUS_MEANING.items()},
-        "warnings": config.real_credential_warnings(),
+        "warnings": config.real_credential_warnings() + _credential_mismatch_warnings(context),
     }
+
+
+def _credential_mismatch_warnings(context: Any) -> list[str]:
+    """Aviso, al frente del reporte, de que la credencial en uso no era la registrada."""
+    if not context.foreign_key_used():
+        return []
+    return [
+        "En la pagina se cargo un .key distinto del de la credencial de la sesion "
+        f"({context.config.credential_mode.value}). Las busquedas por contenido (canarios) "
+        "son de la credencial registrada y no dicen nada del material que se uso; la "
+        "contrasena de ese .key no estaba protegida en el vault, y su longitud no sirve para "
+        "distinguirla de otras. Si era una e.firma real, repita la auditoria en modo "
+        "credencial real, que la registra y la protege."
+    ]
 
 
 def write_package(store: EvidenceStore, config: AuditConfig, session_id: str,
@@ -188,7 +212,7 @@ def write_package(store: EvidenceStore, config: AuditConfig, session_id: str,
         "os": versions.get("os", ""),
         "python": versions.get("python", ""),
         "audit_configuration": config.to_dict(),
-        "network_mode": "OFFLINE-TESTED" if report["counts"]["offline_windows"] else "ONLINE",
+        "network_mode": _network_mode(config, report["counts"]["offline_windows"]),
         "credential": report["credential"],
         "scripts_sha256": {s["url"]: s["sha256"] for s in store.scripts()},
         "proxy": config.proxy.to_dict(),
@@ -336,6 +360,19 @@ def _esc(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
+def _isolation_scope(isolation: dict[str, Any], counts: dict[str, Any]) -> str:
+    """Alcance del aislamiento, junto al numero de ventanas: una ventana "solo
+    terceros" no es una ventana sin red."""
+    mode = (isolation.get("policy") or {}).get("mode")
+    if not counts.get("offline_windows") or not mode:
+        return ""
+    if mode == "third-party":
+        return " (solo terceros: el servidor del sitio seguia alcanzable)"
+    if mode == "allowlist" and (isolation.get("policy") or {}).get("allow_hosts"):
+        return " (lista de permitidos: esos hosts seguian alcanzables)"
+    return " (total)"
+
+
 def render_html(report: dict[str, Any]) -> str:
     """Reporte HTML autocontenido, sin recursos externos."""
     session = _esc(report["session"])
@@ -434,7 +471,7 @@ def render_html(report: dict[str, Any]) -> str:
     <dt>Eventos</dt><dd>{counts['events']}</dd>
     <dt>Peticiones</dt><dd>{counts['requests']}</dd>
     <dt>Scripts</dt><dd>{counts['scripts']}</dd>
-    <dt>Ventanas sin red</dt><dd>{counts['offline_windows']}</dd>
+    <dt>Ventanas de aislamiento</dt><dd>{counts['offline_windows']}{_esc(_isolation_scope(isolation, counts))}</dd>
     <dt>Navegador</dt><dd>{_esc(report['versions'].get('browser', ''))}</dd>
     <dt>Agente SHA-256</dt><dd><code>{_esc(report['versions'].get('agent_sha256', ''))}</code></dd>
     <dt>Cadena</dt><dd>{'intacta' if integrity['verified'] else 'ROTA'}
