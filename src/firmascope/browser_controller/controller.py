@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 
@@ -24,7 +26,12 @@ from ..audit_core.config import AuditConfig
 from ..audit_core.events import Event, EventType
 from ..audit_core.secrets import SecretVault
 from ..evidence_store.store import EvidenceStore, ScriptRecord
-from ..instrumentation_agent.loader import DEFAULT_CHANNEL, build_init_script, record_to_event
+from ..instrumentation_agent.loader import (
+    DEFAULT_CHANNEL,
+    WORKER_MARK,
+    build_init_script,
+    record_to_event,
+)
 from ..network_analyzer import domains
 from ..network_analyzer.cdp_observer import NetworkObserver
 from .isolation import DEFAULT_STAGES, NetworkIsolation, Stage, StagedOfflineTest
@@ -63,12 +70,14 @@ class BrowserController:
     # ------------------------------------------------------------------
     def start(self) -> "BrowserController":
         self._playwright = sync_playwright().start()
+        from .launch import launch_chromium
+
         launch_kwargs: dict[str, Any] = {
             "headless": self.config.headless,
             "args": list(self.config.browser_args),
+            "executable_path": self.config.browser_path,
+            "sandbox": self.config.sandbox,
         }
-        if self.config.browser_path:
-            launch_kwargs["executable_path"] = self.config.browser_path
 
         # El proxy arranca antes del navegador: su puerto se elige en tiempo de
         # ejecucion y el navegador lo necesita en la linea de comandos.
@@ -81,7 +90,7 @@ class BrowserController:
             # silencio se leeria como ausencia de trafico.
             launch_kwargs["args"] = list(launch_kwargs["args"]) + [
                 "--proxy-bypass-list=<-loopback>"]
-        self.browser = self._playwright.chromium.launch(**launch_kwargs)
+        self.browser = launch_chromium(self._playwright, **launch_kwargs)
         self.browser_version = self.browser.version
 
         context_kwargs: dict[str, Any] = {
@@ -98,9 +107,12 @@ class BrowserController:
         self.context.set_default_timeout(30_000)
 
         self.context.expose_binding(DEFAULT_CHANNEL, self._on_agent_record)
-        self.context.add_init_script(build_init_script(
-            self.session_id, DEFAULT_CHANNEL,
-            redact_names=bool(getattr(self.config.privacy, "redact_filenames", False))))
+        self.context.add_init_script(self._init_script())
+        # Los workers se instrumentan interceptando la descarga de su script
+        # (ver `workerTarget` en agent.js): asi conservan su URL real. Cargarlos
+        # desde un blob: rompia toda ruta relativa dentro del worker, y la
+        # auditoria observaba un sitio roto en lugar del real. Portado del PR #2.
+        self.context.route(re.compile(rf"[?&]{WORKER_MARK}=1"), self._on_worker_script)
 
         self.observer = NetworkObserver(self.session_id, self.store, self.config, self.emit, self.vault)
         self.isolation = NetworkIsolation(
@@ -113,6 +125,39 @@ class BrowserController:
         self.page = self.context.new_page()
         self._register_page(self.page)
         return self
+
+    def _init_script(self) -> str:
+        return build_init_script(
+            self.session_id, DEFAULT_CHANNEL,
+            redact_names=bool(getattr(self.config.privacy, "redact_filenames", False)),
+            worker_routing=True)
+
+    def _on_worker_script(self, route) -> None:
+        """Antepone el agente al script de un worker marcado por el agente.
+
+        El script se pide al servidor sin la marca, de modo que el sitio ve
+        exactamente la peticion que habria hecho. Si algo falla, la peticion
+        sigue su curso sin instrumentar: un worker sin observar es preferible a
+        un worker roto, y el evento de error lo deja dicho en el expediente.
+        """
+        original = strip_worker_mark(route.request.url)
+        try:
+            response = route.fetch(url=original)
+            if not response.ok:
+                route.fulfill(response=response)
+                return
+            headers = {k: v for k, v in response.headers.items()
+                       if k.lower() not in ("content-length", "content-encoding")}
+            route.fulfill(status=response.status, headers=headers,
+                          body=self._init_script().encode("utf-8") + b"\n;\n" + response.body())
+        except Exception as exc:
+            self.emit(Event(EventType.AGENT_ERROR, self.session_id, sensor="browser",
+                            data={"kind": "worker-route", "url": original,
+                                  "error": str(exc)[:200]}))
+            try:
+                route.continue_(url=original)
+            except Exception:  # pragma: no cover - la ruta ya se resolvio
+                pass
 
     def stop(self) -> None:
         self.drain_agent()
@@ -449,3 +494,11 @@ def _sourcemap_url(body: str) -> str:
         if index >= 0:
             return tail[index + len(marker):].split("\n", 1)[0].strip()[:300]
     return ""
+
+
+def strip_worker_mark(url: str) -> str:
+    """Quita la marca ``__fs_worker=1`` y deja el resto de la URL intacto."""
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k != WORKER_MARK]
+    return urlunsplit(parts._replace(query=urlencode(query, doseq=True)))

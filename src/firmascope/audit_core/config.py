@@ -220,7 +220,9 @@ def normalize_url(url: str) -> str:
 #: certificado que no significan nada. Un perfil de auditoria debe estar
 #: callado para que lo que se observe sea atribuible al portal.
 QUIET_BROWSER_ARGS: tuple[str, ...] = (
-    "--no-sandbox",
+    # Sin "--no-sandbox": desactivaba el aislamiento de Chromium en el equipo
+    # del operador justo mientras cargaba un sitio de internet. El sandbox lo
+    # decide `launch_chromium`, en un solo sitio (ver browser_controller/launch).
     "--disable-background-networking",
     "--disable-background-timer-throttling",
     "--disable-breakpad",
@@ -314,6 +316,10 @@ class AuditConfig:
     output_dir: Path = Path("audits")
     headless: bool = True
     browser_path: str | None = field(default_factory=default_chromium_path)
+    #: Sandbox de Chromium. ``None``: activado salvo al ejecutar como root, que
+    #: es cuando Chromium se niega a arrancar con el. ``False`` es una decision
+    #: explicita del operador (``--no-sandbox``).
+    sandbox: bool | None = None
     browser_args: list[str] = field(default_factory=lambda: list(QUIET_BROWSER_ARGS))
     viewport: tuple[int, int] = (1280, 900)
     #: Segundos maximos de sesion interactiva antes de cerrar automaticamente.

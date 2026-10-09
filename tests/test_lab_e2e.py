@@ -12,7 +12,9 @@ dice "la clave salio" es correcto solo si el recolector la tiene, y uno que dice
 
 from __future__ import annotations
 
+import base64
 import json
+import urllib.parse
 
 import pytest
 
@@ -316,3 +318,39 @@ def test_el_piloto_se_niega_con_una_credencial_que_no_es_sintetica():
     """Rellenar una e.firma propia sin nadie delante no se permite."""
     with pytest.raises(ValueError):
         AuditConfig(target="https://x.mx", credential_mode="own-test", autopilot=True)
+
+
+# ----------------------------------------------------------------------
+# Laboratorios que llegaron con el PR #2
+# ----------------------------------------------------------------------
+
+def test_tc009_la_clave_en_un_pixel_se_detecta_y_no_llega_al_expediente(lab, tmp_path):
+    """GET sin cuerpo: la clave en la query string de un pixel de seguimiento."""
+    lab.COLLECTED.clear()
+    report, pilot = run_autopilot("demo-side-channels", tmp_path, isolation="none")
+
+    assert pilot.signed
+    assert any("pixel" in c["path"] for c in lab.COLLECTED), "el pixel no salio"
+    assert status(report, "FS-KEY-001") == "OBSERVED"
+    assert status(report, "FS-PWD-001") == "OBSERVED"
+
+    # La clave salio, pero no puede quedar escrita en el expediente.
+    cred_dir = tmp_path / "credenciales"
+    key_der = next(cred_dir.glob("*.key")).read_bytes()
+    b64 = base64.b64encode(key_der).decode()
+    crudo = b"".join(p.read_bytes() for p in (tmp_path / report["session"]).rglob("*")
+                     if p.is_file())
+    for forma in (b64, urllib.parse.quote(b64, safe=""),
+                  urllib.parse.quote(b64, safe="")[200:260]):
+        assert forma.encode() not in crudo
+
+
+def test_tc010_un_worker_instrumentado_sigue_funcionando(lab, tmp_path):
+    """La instrumentacion no puede romper el sitio que audita."""
+    lab.COLLECTED.clear()
+    report, pilot = run_autopilot("demo-worker", tmp_path, isolation="none")
+
+    assert pilot.signed
+    assert [c for c in lab.COLLECTED if c["path"] == "/collect/worker"], \
+        "el worker no llego a ejecutarse: la instrumentacion lo rompio"
+    assert status(report, "FS-KEY-001") == "OBSERVED"

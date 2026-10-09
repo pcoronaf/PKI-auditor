@@ -198,7 +198,7 @@ class FirmaScopeAddon:
         body = request.raw_content or b""
         content_type = request.headers.get("content-type", "")
 
-        tags, matches = self._classify(body, content_type)
+        tags, matches = self._classify(body, content_type, request.pretty_url)
         observation = ProxyObservation(
             id=uuid.uuid4().hex,
             timestamp=getattr(request, "timestamp_start", 0.0) or 0.0,
@@ -211,7 +211,7 @@ class FirmaScopeAddon:
             body_digest=hashlib.sha256(body).hexdigest() if body else "",
             content_type=content_type,
             tags=tags,
-            canary_matches=[m.to_dict() for m in matches],
+            canary_matches=list(matches),
             http_version=str(getattr(request, "http_version", "")),
             tls=request.scheme == "https",
             # multipart y los flujos son precisamente los que CDP no entrega.
@@ -235,21 +235,20 @@ class FirmaScopeAddon:
             return None
         return body[: self.max_body_bytes]
 
-    def _classify(self, body: bytes, content_type: str) -> tuple[list[str], list]:
-        """Busca representaciones de canarios dentro del cuerpo."""
-        if not body:
-            return [], []
+    def _classify(self, body: bytes, content_type: str,
+                  url: str = "") -> tuple[list[str], list]:
+        """Busca canarios en el cuerpo y en la URL."""
+        from ..network_analyzer.canaries import classify
+
         if any(content_type.startswith(prefix) for prefix in SKIP_CONTENT_TYPES):
-            return [], []
+            body = b""
         if self.vault is None or not self.vault.alive:
             # Sin vault no se puede afirmar nada del contenido. Se dice que el
             # cuerpo es opaco, que es verdad, en lugar de sugerir que es inocuo.
-            return [Tag.UNCLASSIFIED.value], []
-
-        self.scanned += 1
-        matches = self.vault.scan(_scannable(body))
-        tags = sorted({m.label for m in matches})
-        return (tags or [Tag.UNCLASSIFIED.value]), matches
+            return ([Tag.UNCLASSIFIED.value] if body else []), []
+        if body:
+            self.scanned += 1
+        return classify(self.vault, _scannable(body) if body else None, url)
 
 
 def _scannable(body: bytes) -> bytes:

@@ -258,7 +258,48 @@ class SecretVault:
         return matches
 
     def labels_in(self, blob: bytes | str) -> set[str]:
-        return {m.label for m in self.scan(blob)}
+        """Etiquetas presentes en ``blob`` o en sus formas decodificadas.
+
+        Una clave en base64 dentro de una URL llega escapada por
+        ``encodeURIComponent`` (``+`` -> ``%2B``, ``/`` -> ``%2F``). Buscar solo
+        la forma cruda la dejaba pasar o no segun los bytes de cada clave: un
+        fallo intermitente que escribia la clave en el expediente. Toda
+        comprobacion previa a escribir a disco usa esta funcion.
+        """
+        labels: set[str] = set()
+        for variant in decoded_variants(blob):
+            labels |= {m.label for m in self.scan(variant)}
+        return labels
+
+
+def decoded_variants(blob: bytes | str) -> list[bytes | str]:
+    """``blob`` y, si parece escapado para URL, sus formas decodificadas."""
+    variants: list[bytes | str] = [blob]
+    text = blob.decode("utf-8", "replace") if isinstance(blob, bytes) else blob
+    if "%" in text or "+" in text:
+        for decoded in (urllib.parse.unquote(text), urllib.parse.unquote_plus(text)):
+            if decoded != text and decoded not in variants:
+                variants.append(decoded)
+    return variants
+
+
+def redact_url(url: str, vault: "SecretVault | None") -> str:
+    """Una URL apta para el expediente.
+
+    Si la query o el fragmento llevan material sensible se sustituyen por un
+    marcador, conservando esquema, host y ruta: el reporte tiene que poder
+    decir *a donde* salio el material sin volver a escribirlo.
+    """
+    if not url or vault is None or not vault.alive:
+        return url
+    labels = vault.labels_in(url)
+    if not labels:
+        return url
+    marker = "<canary:" + ",".join(sorted(labels)) + ">"
+    parts = urllib.parse.urlsplit(url)
+    if vault.labels_in(parts.scheme + "://" + parts.netloc + parts.path):
+        return marker
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, marker, ""))
 
 
 # ----------------------------------------------------------------------
@@ -300,6 +341,12 @@ def redact(data: dict, vault: SecretVault | None = None, privacy=None) -> dict:
     def clean_value(value, key: str = ""):
         if isinstance(value, str):
             if vault is not None and vault.alive:
+                if "://" in value[:16]:
+                    # Una URL con la clave en la query conserva su destino:
+                    # es la mitad util del hallazgo.
+                    cleaned = redact_url(value, vault)
+                    if cleaned != value:
+                        return cleaned
                 labels = vault.labels_in(value)
                 if labels:
                     return "<canary:" + ",".join(sorted(labels)) + ">"
@@ -332,7 +379,7 @@ def assert_no_secrets(payload: str, vault: SecretVault | None) -> None:
     """Invariante de seguridad usada en pruebas y en el exportador."""
     if vault is None or not vault.alive:
         return
-    hits = vault.scan(payload)
+    hits = [hit for variant in decoded_variants(payload) for hit in vault.scan(variant)]
     if hits:
         raise AssertionError(
             "material sensible a punto de escribirse a disco: "

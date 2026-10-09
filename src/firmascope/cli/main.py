@@ -306,6 +306,8 @@ def cmd_audit(args: argparse.Namespace) -> int:
         return 2
     config = setup.config
     password = setup.password
+    if getattr(args, "no_sandbox", False):
+        config.sandbox = False
     if getattr(args, "dwell", None) is not None:
         config.dwell = float(args.dwell)
     if getattr(args, "offline_dwell", None) is not None:
@@ -564,6 +566,9 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--output", default=None, help="directorio de expedientes")
     audit.add_argument("--note", default=None,
                        help="etiqueta libre para identificar la prueba")
+    audit.add_argument("--no-sandbox", action="store_true",
+                       help="desactivar el sandbox de Chromium. Solo si el sistema no lo "
+                            "admite: el sitio auditado queda menos aislado del equipo.")
     audit.add_argument("--auto", action="store_true",
                        help="piloto automatico: recorre las etapas y rellena el "
                             "formulario con la credencial sintetica. Solo con "

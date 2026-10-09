@@ -19,6 +19,7 @@ from ..audit_core.config import AuditConfig
 from ..audit_core.events import (
     EGRESS_EVENTS,
     KEY_ACCESS_EVENTS,
+    is_key_access,
     Event,
     EventType,
     Tag,
@@ -95,7 +96,8 @@ class AuditContext:
         return str(event.data.get("host") or "")
 
     def key_access_events(self) -> list[Event]:
-        return [e for e in self.events if e.type in KEY_ACCESS_EVENTS]
+        """Accesos a material *privado*: leer el documento o el .cer no cuenta."""
+        return [e for e in self.events if is_key_access(e)]
 
     # -- tiempo ----------------------------------------------------------
     @staticmethod
@@ -278,9 +280,51 @@ class AuditContext:
             ts = self.usable_time(request.get("timestamp"))
             if ts is None or ts < anchor.timestamp:
                 continue
+            if self.request_blocked(request):
+                # El aislamiento la aborto: el tercero no recibio nada.
+                continue
             domain = request.get("registrable_domain") or domains.host_of(request.get("url", ""))
             grouped.setdefault(domain, []).append(request)
         return grouped
+
+    def request_blocked(self, request: dict[str, Any]) -> bool:
+        """True si la peticion no llego a su destino.
+
+        Se pregunta primero a la correlacion, que sabe que abortó el
+        aislamiento. Si no tiene esa peticion, decide el modo de aislamiento:
+        en modo total o de terceros, un tercero emitido con la red cortada no
+        pudo salir; en modo lista de permitidos solo si no estaba en la lista.
+        Contar sin mas toda peticion emitida sin red, como hacia el PR #2,
+        acusaria de nada a un tercero permitido y absolveria a uno que si salio.
+        """
+        from ..audit_core.config import IsolationMode
+
+        if request.get("blocked"):
+            return True
+        if request.get("id") and request["id"] in self._blocked_request_ids():
+            return True
+        ts = self.usable_time(request.get("timestamp"))
+        if ts is None or not self.offline_at(ts):
+            return False
+        policy = self.config.isolation
+        if policy.mode in (IsolationMode.FULL, IsolationMode.THIRD_PARTY):
+            return True
+        if policy.mode is IsolationMode.ALLOWLIST:
+            host = str(request.get("host") or "").split(":", 1)[0]
+            return host not in {h.split(":", 1)[0] for h in policy.allow_hosts}
+        return False
+
+    def _blocked_request_ids(self) -> set[str]:
+        cached = getattr(self, "_blocked_ids_cache", None)
+        if cached is not None:
+            return cached
+        ids: set[str] = set()
+        for event in self.events:
+            request_id = event.data.get("request_id")
+            if request_id and event.type in EGRESS_EVENTS and self.was_blocked(event):
+                ids.add(str(request_id))
+        self._blocked_ids_cache = ids
+        return ids
 
     def third_party_names(self) -> dict[str, str]:
         names: dict[str, str] = {}
