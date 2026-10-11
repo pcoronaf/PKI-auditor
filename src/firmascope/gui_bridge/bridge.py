@@ -137,7 +137,10 @@ class Bridge:
     def cmd_validate(self, answers: dict[str, Any] | None = None) -> dict[str, Any]:
         answers = dict(answers or {})
         return {
-            "problems": options_module.validate(answers),
+            # El consentimiento no bloquea el boton Iniciar: es el que abre su
+            # pantalla. Se informa aparte, y cmd_start lo sigue exigiendo.
+            "problems": options_module.validate(answers, include_consent=False),
+            "consent_required": options_module.consent_pending(answers),
             "visible": [o.id for o in options_module.visible_options(answers)],
             "needs_password": options_module.needs_password(answers),
         }

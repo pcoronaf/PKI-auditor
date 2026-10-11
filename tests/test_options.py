@@ -53,6 +53,32 @@ def test_la_credencial_real_no_se_acepta_sin_consentimiento():
                 if "acepto" in p.lower() or "riesgo" in p.lower()]
 
 
+def test_el_consentimiento_pendiente_no_bloquea_el_boton_que_lo_pide(tmp_path):
+    """La interfaz pide el consentimiento en su pantalla, al pulsar Iniciar.
+    Si la validacion de la interfaz lo cuenta como problema, el boton queda
+    desactivado y la pantalla nunca se abre."""
+    from firmascope.gui_bridge.bridge import Bridge
+
+    key, cer = tmp_path / "a.key", tmp_path / "a.cer"
+    key.write_bytes(b"k")
+    cer.write_bytes(b"c")
+    respuestas = options.defaults()
+    respuestas.update({"credentials": "real", "key_path": str(key), "cert_path": str(cer)})
+
+    assert options.consent_pending(respuestas)
+    assert options.validate(respuestas, include_consent=False) == []
+    check = Bridge().cmd_validate(respuestas)
+    assert check["problems"] == [] and check["consent_required"] is True
+
+    # Al arrancar sigue exigiendose.
+    assert options.validate(respuestas)
+    respuestas["accept_real_risk"] = True
+    assert not options.consent_pending(respuestas)
+    assert Bridge().cmd_validate(respuestas)["consent_required"] is False
+    # Con la credencial sintetica no hay nada que consentir.
+    assert not options.consent_pending(options.defaults())
+
+
 def test_lo_que_cambiaria_el_significado_de_lo_registrado_no_se_cambia_en_marcha():
     config = options.build_config(options.defaults())
     with pytest.raises(ValueError):
