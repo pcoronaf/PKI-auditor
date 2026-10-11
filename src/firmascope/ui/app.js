@@ -458,7 +458,8 @@ async function start() {
   const check = await refreshValidation();
   if (check.problems.length) { return; }
 
-  if (String(state.answers.credentials) === 'real' && !state.answers.accept_real_risk) {
+  // Lo decide el nucleo: la interfaz no sabe que opciones exigen consentimiento.
+  if (check.consent_required) {
     askConsent();
     return;
   }

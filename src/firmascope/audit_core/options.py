@@ -385,12 +385,32 @@ def visible_options(answers: dict[str, Any], group: str | None = None) -> list[O
 # Validacion
 # ----------------------------------------------------------------------
 
-def validate(answers: dict[str, Any]) -> list[str]:
-    """Devuelve la lista de problemas. Vacia significa que se puede arrancar."""
+#: El consentimiento de la credencial real. La interfaz lo pide en una pantalla
+#: propia, al pulsar Iniciar.
+CONSENT_OPTION = "accept_real_risk"
+
+
+def consent_pending(answers: dict[str, Any]) -> bool:
+    """``True`` si la configuracion exige el consentimiento y aun no se dio."""
+    return (any(o.id == CONSENT_OPTION for o in visible_options(answers))
+            and not answers.get(CONSENT_OPTION))
+
+
+def validate(answers: dict[str, Any], *, include_consent: bool = True) -> list[str]:
+    """Devuelve la lista de problemas. Vacia significa que se puede arrancar.
+
+    Con ``include_consent=False`` el consentimiento pendiente no cuenta como
+    problema: la interfaz lo pide en su pantalla, que se abre al pulsar
+    Iniciar. Contarlo deshabilitaba ese boton, y con "Mi e.firma real" la
+    pantalla nunca llegaba a abrirse: solo quedaba el mensaje, sin casilla. Al
+    arrancar se valida con el consentimiento incluido.
+    """
     problems: list[str] = []
     for option in visible_options(answers):
         value = answers.get(option.id)
         if option.kind is OptionKind.BOOL:
+            if option.id == CONSENT_OPTION and not include_consent:
+                continue
             if option.required and not value:
                 problems.append(f"{option.label}: es necesario aceptarlo para continuar.")
             continue

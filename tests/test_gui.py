@@ -167,19 +167,38 @@ def test_no_se_arranca_con_la_configuracion_invalida(gui):
     assert "Archivo .key" in problemas
 
 
-def test_la_credencial_real_exige_escribir_acepto(gui):
+def test_la_credencial_real_exige_escribir_acepto(gui, credential):
+    """Con "Mi e.firma real" y los archivos correctos, Iniciar abre la pantalla
+    de consentimiento. Antes el nucleo contaba el consentimiento pendiente como
+    un problema mas: el boton quedaba desactivado, la pantalla nunca se abria y
+    el operador solo veia "es necesario aceptarlo", sin casilla donde hacerlo."""
     gui.check("input[name='credentials'][value='real']")
     gui.wait_for_selector("[data-option='key_path']", timeout=10000)
     # Sin archivos no se puede ni llegar al consentimiento: primero validar.
     assert gui.is_disabled("#start")
 
-    # Con los campos resueltos, el consentimiento es una pantalla aparte.
-    gui.evaluate("""() => {
-        document.querySelector("[data-option='key_path'] input").value = '/no/existe.key';
-    }""")
-    # La pantalla de consentimiento solo aparece al pulsar Iniciar, y el nucleo
-    # sigue rechazando la configuracion: el boton no debe habilitarse.
-    assert gui.is_disabled("#start")
+    gui.fill("[data-option='key_path'] input", str(credential.key_path))
+    gui.dispatch_event("[data-option='key_path'] input", "change")
+    gui.wait_for_selector("[data-option='cert_path'] input", timeout=10000)
+    gui.fill("[data-option='cert_path'] input", str(credential.cert_path))
+    gui.dispatch_event("[data-option='cert_path'] input", "change")
+    gui.wait_for_function("() => !document.getElementById('start').disabled",
+                          timeout=10000)
+    assert "aceptarlo" not in gui.inner_text("#view-setup")
+
+    gui.click("#start")
+    gui.wait_for_selector("#view-consent:not([hidden])", timeout=10000)
+    # Sin escribir ACEPTO no se avanza.
+    gui.fill("#consent-input", "acepto a medias")
+    gui.click("[data-action='consent-ok']")
+    gui.wait_for_function(
+        "() => document.getElementById('toast').textContent.includes('ACEPTO')",
+        timeout=5000)
+    assert not gui.query_selector("#view-consent[hidden]")
+
+    gui.click("[data-action='consent-cancel']")
+    gui.wait_for_selector("#view-setup:not([hidden])", timeout=5000)
+    assert not gui.errors, f"errores de consola: {gui.errors}"
 
 
 def test_recorre_las_etapas_y_produce_un_expediente(gui, credential):
